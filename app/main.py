@@ -18,6 +18,7 @@ from app.routes.cities import router as cities_router
 from app.routes.airports import router as airports_router
 from app.routes.recommendations import router as recommendations_router
 from app.routes.reports import router as reports_router
+from app.routes.booking import router as booking_router
 from app.database import init_db
 
 
@@ -114,6 +115,7 @@ app.include_router(users_router)
 app.include_router(cities_router)
 app.include_router(airports_router)
 app.include_router(flights_router)
+app.include_router(booking_router)
 app.include_router(ai_router)
 app.include_router(recommendations_router)
 app.include_router(reports_router)

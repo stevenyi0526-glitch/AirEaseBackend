@@ -8,8 +8,12 @@ from sqlalchemy.orm import Session
 from typing import Optional
 
 from app.database import get_db, UserDB
-from app.models import UserCreate, UserLogin, UserUpdate, Token, UserResponse
+from app.models import (
+    UserCreate, UserLogin, UserUpdate, Token, UserResponse,
+    VerificationRequest, ResendVerificationRequest, VerificationResponse
+)
 from app.services.auth_service import auth_service
+from app.services.verification_service import verification_service
 
 router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
 
@@ -67,20 +71,22 @@ def require_auth(
 
 @router.post(
     "/register",
-    response_model=Token,
-    status_code=status.HTTP_201_CREATED,
-    summary="Register new user",
-    description="Create a new user account and return JWT token"
+    response_model=VerificationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Initiate registration with email verification",
+    description="Start registration process by sending verification code to email"
 )
 async def register(user_data: UserCreate, db: Session = Depends(get_db)):
     """
-    Register a new user.
+    Initiate user registration with email verification.
 
+    Step 1 of 2-step registration:
     - **email**: Valid email address (must be unique)
     - **username**: Display name (3-50 characters)
     - **password**: Password (minimum 6 characters)
 
-    Returns JWT token on successful registration.
+    Sends a 6-digit verification code to the provided email.
+    User must call /verify-email with the code to complete registration.
     """
     # Check if email already exists
     existing_user = db.query(UserDB).filter(UserDB.email == user_data.email).first()
@@ -90,13 +96,89 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
             detail="Email already registered"
         )
 
-    # Create new user with generated family_id
-    hashed_password = auth_service.hash_password(user_data.password)
+    # Generate verification code
+    code = verification_service.generate_code()
+    
+    # Store pending registration
+    user_dict = {
+        "email": user_data.email,
+        "username": user_data.username,
+        "password": user_data.password,
+        "label": user_data.label.value
+    }
+    verification_service.store_pending_registration(
+        email=user_data.email,
+        code=code,
+        user_data=user_dict
+    )
+    
+    # Send verification email
+    email_sent = await verification_service.send_verification_email(
+        email=user_data.email,
+        code=code,
+        username=user_data.username
+    )
+    
+    if not email_sent and verification_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send verification email. Please try again."
+        )
+    
+    return VerificationResponse(
+        message="Verification code sent to your email",
+        email=user_data.email,
+        expires_in_minutes=verification_service.CODE_EXPIRY_MINUTES
+    )
+
+
+@router.post(
+    "/verify-email",
+    response_model=Token,
+    status_code=status.HTTP_201_CREATED,
+    summary="Complete registration with verification code",
+    description="Verify email and complete user registration"
+)
+async def verify_email(
+    verification: VerificationRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Complete registration with email verification code.
+
+    Step 2 of 2-step registration:
+    - **email**: Email address used in registration
+    - **code**: 6-digit verification code from email
+
+    Returns JWT token on successful verification.
+    """
+    # Verify the code and get user data
+    user_data = verification_service.verify_code(
+        email=verification.email,
+        submitted_code=verification.code
+    )
+    
+    if not user_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification code"
+        )
+    
+    # Double-check email doesn't exist (race condition protection)
+    existing_user = db.query(UserDB).filter(UserDB.email == verification.email).first()
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email already registered"
+        )
+    
+    # Create user account
+    hashed_password = auth_service.hash_password(user_data["password"])
     db_user = UserDB(
-        user_email=user_data.email,
-        user_name=user_data.username,
+        user_email=user_data["email"],
+        user_name=user_data["username"],
         user_password=hashed_password,
-        user_label=user_data.label.value,
+        user_label=user_data["label"],
         family_id=UserDB.generate_family_id()
     )
 
@@ -123,6 +205,64 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
             label=db_user.user_label,
             family_id=db_user.family_id
         )
+    )
+
+
+@router.post(
+    "/resend-verification",
+    response_model=VerificationResponse,
+    summary="Resend verification code",
+    description="Resend verification code to email for pending registration"
+)
+async def resend_verification(
+    request: ResendVerificationRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Resend verification code for pending registration.
+
+    - **email**: Email address with pending verification
+
+    Generates a new code and sends it to the email.
+    """
+    # Check if there's a pending registration
+    pending = verification_service.get_pending_registration(request.email)
+    
+    if not pending:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No pending registration for this email. Please register first."
+        )
+    
+    _, user_data = pending
+    
+    # Generate new code
+    new_code = verification_service.generate_code()
+    
+    # Update pending registration with new code
+    verification_service.store_pending_registration(
+        email=request.email,
+        code=new_code,
+        user_data=user_data
+    )
+    
+    # Send new verification email
+    email_sent = await verification_service.send_verification_email(
+        email=request.email,
+        code=new_code,
+        username=user_data.get("username", "User")
+    )
+    
+    if not email_sent and verification_service.is_configured():
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send verification email. Please try again."
+        )
+    
+    return VerificationResponse(
+        message="New verification code sent to your email",
+        email=request.email,
+        expires_in_minutes=verification_service.CODE_EXPIRY_MINUTES
     )
 
 

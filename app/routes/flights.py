@@ -11,7 +11,7 @@ import uuid
 
 from app.models import (
     FlightSearchResponse, FlightDetail, PriceHistory,
-    FlightWithScore, SearchMeta, ErrorResponse
+    FlightWithScore, SearchMeta, ErrorResponse, RoundTripSearchResponse
 )
 from app.services.mock_service import mock_flight_service
 from app.services.serpapi_service import serpapi_flight_service, get_airport_code
@@ -20,6 +20,9 @@ from app.config import settings
 
 # Maximum number of results for non-authenticated users
 MAX_FREE_RESULTS = 3
+
+# Default page size for flight results
+DEFAULT_PAGE_SIZE = 40
 
 # Set to True to use SerpAPI (real data), False for mock data
 USE_SERPAPI = True
@@ -57,6 +60,8 @@ async def search_flights(
     stops: Optional[int] = Query(None, ge=0, le=3, description="经停：0=任意, 1=直飞, 2=1经停或更少, 3=2经停或更少"),
     sort_by: str = Query("score", description="排序方式：score/price/duration/departure/arrival"),
     traveler_type: str = Query("default", description="旅客类型：student/business/family/default - 影响评分权重"),
+    limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=100, description="每页返回数量，默认40，最大100"),
+    offset: int = Query(0, ge=0, description="偏移量，用于分页加载更多"),
     authorization: Optional[str] = Header(None, description="JWT Bearer token")
 ):
     """
@@ -100,7 +105,10 @@ async def search_flights(
                 arrival_code = get_airport_code(to_city)
                 travel_class = map_cabin_to_travel_class(cabin)
                 
-                # Call SerpAPI
+                # Call SerpAPI with traveler_type to optimize sort strategy
+                # - student: fetches cheapest flights first (sort_by=2)
+                # - business: fetches top-ranked flights (sort_by=1)
+                # - family: fetches top-ranked flights (sort_by=1)
                 serpapi_response = await serpapi_flight_service.search_flights(
                     departure_id=departure_code,
                     arrival_id=arrival_code,
@@ -110,6 +118,7 @@ async def search_flights(
                     adults=adults,
                     currency=currency,
                     stops=stops,
+                    traveler_type=traveler_type,  # Pass traveler_type for optimal sorting
                 )
                 
                 # Check for API errors
@@ -117,35 +126,43 @@ async def search_flights(
                     print(f"SerpAPI error: {serpapi_response['error']}")
                     raise Exception(serpapi_response["error"])
                 
-                # Parse the response
+                # Parse the response with traveler_type for personalized scoring
                 all_flights, price_insights = serpapi_flight_service.parse_flight_response(
-                    serpapi_response, cabin
+                    serpapi_response, cabin, traveler_type=traveler_type
                 )
                 
             except Exception as e:
                 print(f"SerpAPI failed, falling back to mock data: {e}")
-                # Fall back to mock data
+                # Fall back to mock data with traveler_type for personalized scoring
                 all_flights = mock_flight_service.search_flights(
                     from_city=from_city,
                     to_city=to_city,
                     date=date,
-                    cabin=cabin
+                    cabin=cabin,
+                    traveler_type=traveler_type
                 )
         else:
-            # Use mock service
+            # Use mock service with traveler_type for personalized scoring
             all_flights = mock_flight_service.search_flights(
                 from_city=from_city,
                 to_city=to_city,
                 date=date,
-                cabin=cabin
+                cabin=cabin,
+                traveler_type=traveler_type
             )
 
         total_count = len(all_flights)
         restricted_count = 0
 
         # Sort flights based on sort_by parameter
+        # Special handling: For students, "score" sorting means "best value" = sort by price
         if sort_by == "score":
-            all_flights.sort(key=lambda x: x.score.overall_score, reverse=True)
+            if traveler_type == "student":
+                # Students: "best score" means "best price" - sort by price ascending
+                all_flights.sort(key=lambda x: x.flight.price)
+            else:
+                # Business/Family/Default: sort by overall weighted score
+                all_flights.sort(key=lambda x: x.score.overall_score, reverse=True)
         elif sort_by == "price":
             all_flights.sort(key=lambda x: x.flight.price)
         elif sort_by == "duration":
@@ -155,25 +172,219 @@ async def search_flights(
         elif sort_by == "arrival":
             all_flights.sort(key=lambda x: x.flight.arrival_time)
 
-        # Limit results for non-authenticated users
+        # Apply pagination with limit and offset
+        # For non-authenticated users, we still apply MAX_FREE_RESULTS limit
         if is_authenticated:
-            visible_flights = all_flights
+            # Apply offset and limit for pagination
+            paginated_flights = all_flights[offset:offset + limit]
+            has_more = (offset + limit) < total_count
         else:
-            visible_flights = all_flights[:MAX_FREE_RESULTS]
+            # Non-authenticated: limit to MAX_FREE_RESULTS, no pagination
+            paginated_flights = all_flights[:MAX_FREE_RESULTS]
             restricted_count = max(0, total_count - MAX_FREE_RESULTS)
+            has_more = False
 
         return FlightSearchResponse(
-            flights=visible_flights,
+            flights=paginated_flights,
             meta=SearchMeta(
                 total=total_count,
                 searchId=f"search-{uuid.uuid4().hex[:8]}",
                 cachedAt=None,
                 restrictedCount=restricted_count,
-                isAuthenticated=is_authenticated
+                isAuthenticated=is_authenticated,
+                limit=limit,
+                offset=offset,
+                hasMore=has_more
             ),
             priceInsights=price_insights
         )
 
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/search-roundtrip",
+    response_model=RoundTripSearchResponse,
+    summary="搜索往返航班",
+    description="搜索往返航班，分别显示出发和返回航班及其各自价格"
+)
+async def search_roundtrip_flights(
+    from_city: str = Query(..., alias="from", description="出发城市/机场代码"),
+    to_city: str = Query(..., alias="to", description="到达城市/机场代码"),
+    date: str = Query(..., description="出发日期（YYYY-MM-DD）"),
+    return_date: str = Query(..., description="返程日期（YYYY-MM-DD）"),
+    cabin: str = Query("economy", description="舱位：economy/business/first"),
+    adults: int = Query(1, ge=1, le=9, description="成人乘客数量"),
+    currency: str = Query("USD", description="货币"),
+    stops: Optional[int] = Query(None, ge=0, le=3, description="经停过滤"),
+    traveler_type: str = Query("default", description="旅客类型：student/business/family/default"),
+    authorization: Optional[str] = Header(None)
+):
+    """
+    搜索往返航班 - 使用两次独立的单程搜索
+    
+    Returns separate departure and return flights with individual one-way prices.
+    This allows users to see the exact cost of each leg.
+    
+    Note: Individual one-way prices may be higher than bundled round-trip prices.
+    """
+    import asyncio
+    
+    try:
+        # Check authentication
+        is_authenticated = False
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization.split(" ")[1]
+            payload = auth_service.decode_token(token)
+            is_authenticated = payload is not None
+        
+        departure_code = get_airport_code(from_city)
+        arrival_code = get_airport_code(to_city)
+        travel_class = map_cabin_to_travel_class(cabin)
+        
+        # Make two parallel one-way searches for individual prices
+        departure_search = serpapi_flight_service.search_flights(
+            departure_id=departure_code,
+            arrival_id=arrival_code,
+            outbound_date=date,
+            return_date=None,  # One-way search
+            travel_class=travel_class,
+            adults=adults,
+            currency=currency,
+            stops=stops,
+            traveler_type=traveler_type,
+        )
+        
+        return_search = serpapi_flight_service.search_flights(
+            departure_id=arrival_code,  # Reversed
+            arrival_id=departure_code,   # Reversed
+            outbound_date=return_date,
+            return_date=None,  # One-way search
+            travel_class=travel_class,
+            adults=adults,
+            currency=currency,
+            stops=stops,
+            traveler_type=traveler_type,
+        )
+        
+        # Execute both searches in parallel
+        departure_response, return_response = await asyncio.gather(
+            departure_search, return_search
+        )
+        
+        # Parse responses
+        departure_flights, dep_price_insights = serpapi_flight_service.parse_flight_response(
+            departure_response, cabin, traveler_type=traveler_type
+        )
+        return_flights, ret_price_insights = serpapi_flight_service.parse_flight_response(
+            return_response, cabin, traveler_type=traveler_type
+        )
+        
+        # Apply authentication limits
+        if not is_authenticated:
+            departure_flights = departure_flights[:MAX_FREE_RESULTS]
+            return_flights = return_flights[:MAX_FREE_RESULTS]
+        
+        total_count = len(departure_flights) + len(return_flights)
+        
+        return RoundTripSearchResponse(
+            departureFlights=departure_flights,
+            returnFlights=return_flights,
+            meta=SearchMeta(
+                total=total_count,
+                searchId=f"roundtrip-{uuid.uuid4().hex[:8]}",
+                cachedAt=None,
+                restrictedCount=0,
+                isAuthenticated=is_authenticated,
+                limit=len(departure_flights),
+                offset=0,
+                hasMore=False
+            ),
+            departurePriceInsights=dep_price_insights,
+            returnPriceInsights=ret_price_insights
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/return-flights",
+    response_model=FlightSearchResponse,
+    summary="获取返程航班",
+    description="使用departure_token获取返程航班选项（用于往返机票）"
+)
+async def get_return_flights(
+    departure_token: str = Query(..., description="从出发航班获取的departure_token"),
+    from_city: str = Query(..., alias="from", description="原始出发城市/机场代码"),
+    to_city: str = Query(..., alias="to", description="原始到达城市/机场代码"),
+    date: str = Query(..., description="出发日期（YYYY-MM-DD）"),
+    return_date: str = Query(..., description="返程日期（YYYY-MM-DD）"),
+    cabin: str = Query("economy", description="舱位：economy/business/first"),
+    adults: int = Query(1, ge=1, le=9, description="成人乘客数量"),
+    currency: str = Query("USD", description="货币"),
+    traveler_type: str = Query("default", description="用户类型：student/business/family/default"),
+    authorization: Optional[str] = Header(None)
+):
+    """
+    获取返程航班选项
+    
+    使用选定出发航班的departure_token来获取匹配的返程航班。
+    每个返程航班显示的价格是往返总价。
+    """
+    try:
+        # Check authentication
+        is_authenticated = False
+        if authorization and authorization.startswith("Bearer "):
+            token = authorization.split(" ")[1]
+            user = auth_service.get_current_user(token)
+            is_authenticated = user is not None
+        
+        # Map cabin to travel class
+        travel_class = map_cabin_to_travel_class(cabin)
+        
+        # Convert city names to airport codes
+        from_code = get_airport_code(from_city)
+        to_code = get_airport_code(to_city)
+        
+        # Fetch return flights
+        return_flights = await serpapi_flight_service.search_return_flights(
+            departure_id=from_code,
+            arrival_id=to_code,
+            outbound_date=date,
+            return_date=return_date,
+            departure_token=departure_token,
+            travel_class=travel_class,
+            adults=adults,
+            currency=currency,
+            traveler_type=traveler_type
+        )
+        
+        total_count = len(return_flights)
+        
+        # For non-authenticated users, limit results
+        if not is_authenticated:
+            return_flights = return_flights[:MAX_FREE_RESULTS]
+            restricted_count = max(0, total_count - MAX_FREE_RESULTS)
+        else:
+            restricted_count = 0
+        
+        return FlightSearchResponse(
+            flights=return_flights,
+            meta=SearchMeta(
+                total=total_count,
+                searchId=f"return-{uuid.uuid4().hex[:8]}",
+                cachedAt=None,
+                restrictedCount=restricted_count,
+                isAuthenticated=is_authenticated,
+                limit=len(return_flights),
+                offset=0,
+                hasMore=False
+            ),
+            priceInsights=None
+        )
+    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -194,10 +405,15 @@ async def get_flight_detail(flight_id: str):
     - 机上设施详情
     - 7天价格历史
     """
-    detail = mock_flight_service.get_flight_detail(flight_id)
+    # First check SerpAPI cache (for recently searched flights)
+    detail = serpapi_flight_service.get_flight_detail(flight_id)
+    
+    # Fall back to mock service
+    if not detail:
+        detail = mock_flight_service.get_flight_detail(flight_id)
     
     if not detail:
-        raise HTTPException(status_code=404, detail="航班不存在")
+        raise HTTPException(status_code=404, detail="航班不存在 - Flight may have expired from cache. Please search again.")
     
     return detail
 
@@ -214,6 +430,12 @@ async def get_price_history(flight_id: str):
     
     返回最近7天的价格变化和趋势分析
     """
+    # First check if flight is in SerpAPI cache
+    detail = serpapi_flight_service.get_flight_detail(flight_id)
+    if detail:
+        return detail.priceHistory
+    
+    # Fall back to mock service
     history = mock_flight_service.get_price_history(flight_id)
     
     if not history:

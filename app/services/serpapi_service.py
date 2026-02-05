@@ -32,8 +32,20 @@ class SerpAPIFlightService:
     
     BASE_URL = "https://serpapi.com/search"
     
+    # Cache for storing flight results by ID (for detail page retrieval)
+    # Format: { flight_id: FlightWithScore }
+    _flight_cache: Dict[str, FlightWithScore] = {}
+    
     def __init__(self):
         self.api_key = settings.serpapi_key
+    
+    # SerpAPI sort_by options
+    SORT_BY_TOP_FLIGHTS = 1  # Google's default ranking
+    SORT_BY_PRICE = 2        # Lowest price first
+    SORT_BY_DEPARTURE = 3    # Departure time
+    SORT_BY_ARRIVAL = 4      # Arrival time
+    SORT_BY_DURATION = 5     # Shortest duration first
+    SORT_BY_EMISSIONS = 6    # Lowest emissions first
     
     async def search_flights(
         self,
@@ -49,9 +61,17 @@ class SerpAPIFlightService:
         stops: Optional[int] = None,  # 0=Any, 1=Nonstop, 2=1 stop or fewer, 3=2 stops or fewer
         deep_search: bool = True,  # Enable for browser-identical results with more flights
         show_hidden: bool = True,  # Include hidden flight results for more options
+        sort_by: Optional[int] = None,  # 1=Top, 2=Price, 3=Departure, 4=Arrival, 5=Duration, 6=Emissions
+        traveler_type: str = "default",  # Used to determine optimal sort strategy
     ) -> Dict[str, Any]:
         """
         Search flights using SerpAPI Google Flights engine.
+        
+        The sort_by parameter is automatically optimized based on traveler_type:
+        - student: sort_by=2 (Price) - Get cheapest flights first
+        - business: sort_by=1 (Top flights) - Google considers reliability
+        - family: sort_by=1 (Top flights) - Default ranking
+        - default: sort_by=1 (Top flights)
         
         Args:
             departure_id: Departure airport code (e.g., "HKG", "LAX")
@@ -70,6 +90,21 @@ class SerpAPIFlightService:
         Returns:
             Dict containing flights, price_insights, and airports info
         """
+        # Determine optimal sort_by based on traveler_type if not explicitly set
+        if sort_by is None:
+            if traveler_type == "student":
+                # Students prioritize price - fetch cheapest flights first
+                sort_by = self.SORT_BY_PRICE
+            elif traveler_type == "business":
+                # Business travelers care about schedule/reliability - use Google's top ranking
+                sort_by = self.SORT_BY_TOP_FLIGHTS
+            elif traveler_type == "family":
+                # Families value comfort - use Google's top ranking (considers amenities)
+                sort_by = self.SORT_BY_TOP_FLIGHTS
+            else:
+                # Default: use Google's top flights ranking
+                sort_by = self.SORT_BY_TOP_FLIGHTS
+        
         params = {
             "engine": "google_flights",
             "departure_id": departure_id,
@@ -80,6 +115,7 @@ class SerpAPIFlightService:
             "gl": gl,
             "adults": adults,
             "travel_class": travel_class,
+            "sort_by": sort_by,  # Add sort_by to API call
             "api_key": self.api_key,
         }
         
@@ -109,10 +145,16 @@ class SerpAPIFlightService:
     def parse_flight_response(
         self,
         serpapi_response: Dict[str, Any],
-        cabin_filter: str = "economy"
+        cabin_filter: str = "economy",
+        traveler_type: str = "default"
     ) -> tuple[List[FlightWithScore], Optional[Dict[str, Any]]]:
         """
         Parse SerpAPI response into FlightWithScore objects.
+        
+        Args:
+            serpapi_response: Raw response from SerpAPI
+            cabin_filter: Cabin class filter (economy/business/first)
+            traveler_type: Traveler persona for personalized scoring (student/business/family/default)
         
         Returns:
             Tuple of (list of FlightWithScore, price_insights dict)
@@ -128,21 +170,180 @@ class SerpAPIFlightService:
         
         for idx, flight_data in enumerate(all_flights):
             try:
-                parsed_flight = self._parse_single_flight(flight_data, idx, cabin_filter, price_insights)
+                parsed_flight = self._parse_single_flight(
+                    flight_data, idx, cabin_filter, price_insights, traveler_type
+                )
                 if parsed_flight:
                     flights_list.append(parsed_flight)
             except Exception as e:
                 print(f"Error parsing flight {idx}: {e}")
                 continue
         
+        # SMART SORTING based on traveler type:
+        # - Students: Sort by PRICE (ascending) - cheapest flights first!
+        #   SerpAPI already fetched by price, but we ensure consistent ordering
+        # - Business: Sort by OVERALL SCORE - best reliable/service flights first
+        # - Family: Sort by OVERALL SCORE - best comfort/service flights first
+        # - Default: Sort by OVERALL SCORE
+        if flights_list:
+            if traveler_type == "student":
+                # Students want cheapest flights first - sort by price ascending
+                flights_list.sort(key=lambda x: x.flight.price)
+            else:
+                # Business, Family, Default: sort by weighted overall score descending
+                flights_list.sort(key=lambda x: x.score.overall_score, reverse=True)
+        
+        # Cache all flights for later retrieval by ID (for detail page)
+        for fws in flights_list:
+            self._flight_cache[fws.flight.id] = fws
+        
         return flights_list, price_insights
+    
+    async def search_return_flights(
+        self,
+        departure_id: str,
+        arrival_id: str,
+        outbound_date: str,
+        return_date: str,
+        departure_token: str,
+        travel_class: int = 1,
+        adults: int = 1,
+        currency: str = "USD",
+        traveler_type: str = "default"
+    ) -> List[FlightWithScore]:
+        """
+        Search for return flights using a departure_token.
+        This is the second step of a round trip booking.
+        
+        Args:
+            departure_token: Token from the selected outbound flight
+            Other params: Same as original search for context
+        
+        Returns:
+            List of return flight options with combined round trip prices
+        """
+        params = {
+            "engine": "google_flights",
+            "api_key": self.api_key,
+            "departure_id": departure_id,
+            "arrival_id": arrival_id,
+            "outbound_date": outbound_date,
+            "return_date": return_date,
+            "type": "1",  # Round trip
+            "currency": currency,
+            "hl": "en",
+            "gl": "us",
+            "departure_token": departure_token,
+        }
+        
+        if travel_class:
+            params["travel_class"] = travel_class
+        if adults > 1:
+            params["adults"] = adults
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(self.BASE_URL, params=params, timeout=30.0)
+            data = response.json()
+        
+        # Determine cabin filter
+        cabin_map = {1: "economy", 2: "premium economy", 3: "business", 4: "first"}
+        cabin_filter = cabin_map.get(travel_class, "economy")
+        
+        return_flights = []
+        
+        # Parse best_flights and other_flights from return response
+        for flight_list_key in ["best_flights", "other_flights"]:
+            for idx, flight_data in enumerate(data.get(flight_list_key, [])):
+                fws = self._parse_single_flight(
+                    flight_data, 
+                    idx, 
+                    cabin_filter,
+                    traveler_type=traveler_type
+                )
+                if fws:
+                    # Mark as return flight
+                    return_flights.append(fws)
+        
+        # Cache return flights
+        for fws in return_flights:
+            self._flight_cache[fws.flight.id] = fws
+        
+        return return_flights
+    
+    def get_flight_detail(self, flight_id: str) -> Optional[FlightDetail]:
+        """
+        Get flight detail from cache.
+        The flight must have been searched recently to be in cache.
+        """
+        fws = self._flight_cache.get(flight_id)
+        if not fws:
+            return None
+        
+        # Generate price history for the flight
+        price_history = self._generate_price_history(fws.flight)
+        
+        return FlightDetail(
+            flight=fws.flight,
+            score=fws.score,
+            facilities=fws.facilities,
+            priceHistory=price_history
+        )
+    
+    def _generate_price_history(self, flight: Flight) -> PriceHistory:
+        """Generate synthetic price history based on current price."""
+        from datetime import timedelta
+        import random
+        
+        base_price = flight.price
+        today = datetime.now()
+        
+        # Generate 7 days of price history with small variations
+        points = []
+        for i in range(7, 0, -1):
+            date = today - timedelta(days=i)
+            # Random variation of -5% to +8%
+            variation = random.uniform(-0.05, 0.08)
+            price = base_price * (1 + variation)
+            points.append(PricePoint(
+                date=date.strftime("%Y-%m-%d"),
+                price=round(price)
+            ))
+        
+        # Add today's price
+        points.append(PricePoint(
+            date=today.strftime("%Y-%m-%d"),
+            price=base_price
+        ))
+        
+        # Determine trend based on price movement
+        if len(points) >= 2:
+            first_price = points[0].price
+            last_price = points[-1].price
+            change_pct = ((last_price - first_price) / first_price) * 100
+            
+            if change_pct < -3:
+                trend = PriceTrend.FALLING
+            elif change_pct > 3:
+                trend = PriceTrend.RISING
+            else:
+                trend = PriceTrend.STABLE
+        else:
+            trend = PriceTrend.STABLE
+        
+        return PriceHistory(
+            flightId=flight.id,
+            points=points,
+            currentPrice=base_price,
+            trend=trend
+        )
     
     def _parse_single_flight(
         self,
         flight_data: Dict[str, Any],
         index: int,
         cabin_filter: str,
-        price_insights: Optional[Dict[str, Any]] = None
+        price_insights: Optional[Dict[str, Any]] = None,
+        traveler_type: str = "default"
     ) -> Optional[FlightWithScore]:
         """Parse a single flight from SerpAPI response."""
         
@@ -220,6 +421,7 @@ class SerpAPIFlightService:
             
             # === NEW SERPAPI FIELDS ===
             booking_token=flight_data.get("booking_token"),
+            departure_token=flight_data.get("departure_token"),  # For round trip return flights
             airline_logo=airline_logo,
             carbon_emissions=carbon_data,
             flight_extensions=flight_data.get("extensions", []),
@@ -238,9 +440,11 @@ class SerpAPIFlightService:
         )
         
         # Generate score based on SerpAPI data (including price_insights for value score)
+        # Pass traveler_type for personalized scoring weights
         score = self._generate_score_from_serpapi(
             flight_data, facilities, carbon_data, first_segment, price_insights,
-            aircraft_model=airplane, cabin_class=travel_class, airline_name=airline
+            aircraft_model=airplane, cabin_class=travel_class, airline_name=airline,
+            traveler_type=traveler_type
         )
         
         return FlightWithScore(
@@ -267,14 +471,19 @@ class SerpAPIFlightService:
         extensions: List[str],
         legroom_inches: Optional[int]
     ) -> FlightFacilities:
-        """Parse amenities from SerpAPI extensions list."""
+        """Parse amenities from SerpAPI extensions list.
+        
+        IMPORTANT: SerpAPI data takes priority over database defaults.
+        If an amenity is not mentioned in extensions, we set it to False (not available).
+        """
         
         has_wifi = False
         wifi_free = False
         has_power = False
         has_ife = False
         ife_type = None
-        meal_included = None  # SerpAPI doesn't typically provide meal info per flight
+        meal_included = False  # Default to False unless SerpAPI says otherwise
+        meal_type = None
         
         # Join extensions for easier searching
         ext_lower = [e.lower() for e in extensions]
@@ -287,7 +496,7 @@ class SerpAPIFlightService:
                 wifi_free = True
         
         # Check for power
-        if "power" in ext_joined or "usb" in ext_joined:
+        if "power" in ext_joined or "usb" in ext_joined or "outlet" in ext_joined:
             has_power = True
         
         # Check for in-flight entertainment
@@ -299,6 +508,21 @@ class SerpAPIFlightService:
                 ife_type = "Live TV"
             elif "stream" in ext_joined:
                 ife_type = "Stream to device"
+            else:
+                ife_type = "In-flight entertainment"
+        
+        # Check for meals - SerpAPI may include meal info in extensions
+        if "meal" in ext_joined or "food" in ext_joined or "dinner" in ext_joined or "lunch" in ext_joined or "breakfast" in ext_joined:
+            meal_included = True
+            if "hot meal" in ext_joined:
+                meal_type = "Hot meal"
+            elif "snack" in ext_joined:
+                meal_type = "Snacks"
+            else:
+                meal_type = "Meal included"
+        elif "snack" in ext_joined:
+            meal_included = True
+            meal_type = "Snacks"
         
         # Determine seat pitch category
         seat_pitch_category = None
@@ -318,7 +542,8 @@ class SerpAPIFlightService:
             has_ife=has_ife,
             ife_type=ife_type,
             meal_included=meal_included,
-            meal_type=None,
+            meal_type=meal_type,
+            wifi_free=wifi_free,  # Add wifi_free to track if free
         )
     
     def _extract_airline_code(self, flight_number: str) -> str:
@@ -445,9 +670,19 @@ class SerpAPIFlightService:
         price_insights: Optional[Dict[str, Any]] = None,
         aircraft_model: str = None,
         cabin_class: str = "Economy",
-        airline_name: str = None
+        airline_name: str = None,
+        traveler_type: str = "default"
     ) -> FlightScore:
-        """Generate flight score based on SerpAPI data, aircraft comfort database, and airline reviews."""
+        """
+        Generate flight score based on SerpAPI data, aircraft comfort database, and airline reviews.
+        
+        Args:
+            traveler_type: Traveler persona for personalized scoring weights.
+                - "student": Prioritizes value (35%) and efficiency (15%)
+                - "business": Prioritizes reliability (30%) and service (20%)
+                - "family": Prioritizes comfort (25%) and service (25%)
+                - "default": Balanced weights across all dimensions
+        """
         
         # Extract airline info
         flight_number = first_segment.get("flight_number", "")
@@ -479,12 +714,13 @@ class SerpAPIFlightService:
         )
         
         # Calculate BUSINESS class comfort score
+        # Use SerpAPI data for amenities - don't assume business class has everything
         comfort_business, comfort_details_business = AircraftComfortService.calculate_comfort_score(
             aircraft_model=aircraft_model,
             cabin_class="business",
-            has_wifi=True,  # Business usually has all amenities
-            has_power=True,
-            has_ife=True,
+            has_wifi=facilities.has_wifi or False,  # Use actual SerpAPI data
+            has_power=facilities.has_power or False,  # Use actual SerpAPI data
+            has_ife=facilities.has_ife or False,  # Use actual SerpAPI data
             legroom_override=None
         )
         
@@ -566,8 +802,8 @@ class SerpAPIFlightService:
         stops = len(layovers)
         duration_minutes = flight_data.get("total_duration")
         
-        # Default traveler type (can be passed from API in future)
-        traveler_type = "default"
+        # Use traveler_type from parameter for personalized scoring
+        # (no longer hardcoded to "default")
         
         # Calculate overall scores using ScoringService with 6 dimensions
         overall, score_details = ScoringService.calculate_overall_score(
@@ -607,10 +843,10 @@ class SerpAPIFlightService:
             service=service_business,
             value=value,
             traveler_type=traveler_type,
-            has_wifi=True,  # Business usually has all amenities
-            has_power=True,
-            has_ife=True,
-            has_meal=True,
+            has_wifi=facilities.has_wifi or False,  # Use actual SerpAPI data
+            has_power=facilities.has_power or False,  # Use actual SerpAPI data
+            has_ife=facilities.has_ife or False,  # Use actual SerpAPI data
+            has_meal=facilities.meal_included or False,  # Use actual SerpAPI data
             stops=stops,
             duration_minutes=duration_minutes,
             apply_boost=True

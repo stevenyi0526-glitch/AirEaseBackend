@@ -33,8 +33,8 @@ class FlightSelectionRequest(BaseModel):
     arrival_city: str
     departure_time: datetime
     airline: str
-    price: int
-    overall_score: int
+    price: float
+    overall_score: float
     cabin_class: str = "economy"
 
 

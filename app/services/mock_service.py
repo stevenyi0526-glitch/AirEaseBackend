@@ -444,9 +444,19 @@ class MockFlightService:
         from_city: str,
         to_city: str,
         date: str,
-        cabin: str = "economy"
+        cabin: str = "economy",
+        traveler_type: str = "default"
     ) -> List[FlightWithScore]:
-        """搜索航班"""
+        """
+        搜索航班
+        
+        Args:
+            traveler_type: Traveler persona for personalized scoring.
+                - "student": Prioritizes value and efficiency
+                - "business": Prioritizes reliability and service  
+                - "family": Prioritizes comfort and service
+                - "default": Balanced weights
+        """
         cabin_map = {
             "economy": "经济舱",
             "business": "公务舱",
@@ -473,9 +483,60 @@ class MockFlightService:
             cabin_match = flight.cabin == target_cabin
             
             if from_match and to_match and cabin_match:
-                results.append(fws)
+                # Recalculate score with the traveler_type for personalized weighting
+                if traveler_type != "default":
+                    personalized_score = self._recalculate_score_with_traveler_type(
+                        fws.score, fws.facilities, traveler_type, flight
+                    )
+                    results.append(FlightWithScore(
+                        flight=flight,
+                        score=personalized_score,
+                        facilities=fws.facilities
+                    ))
+                else:
+                    results.append(fws)
         
         return results
+    
+    def _recalculate_score_with_traveler_type(
+        self,
+        original_score: FlightScore,
+        facilities: FlightFacilities,
+        traveler_type: str,
+        flight: Flight
+    ) -> FlightScore:
+        """Recalculate overall score with traveler-specific weights."""
+        dims = original_score.dimensions
+        
+        # Calculate new overall score with traveler-specific weights
+        new_overall, score_details = ScoringService.calculate_overall_score(
+            reliability=dims.reliability,
+            comfort=dims.comfort,
+            service=dims.service,
+            value=dims.value,
+            traveler_type=traveler_type,
+            has_wifi=facilities.has_wifi or False,
+            has_power=facilities.has_power or False,
+            has_ife=facilities.has_ife or False,
+            has_meal=facilities.meal_included or False,
+            stops=flight.stops,
+            duration_minutes=flight.duration_minutes,
+            apply_boost=True
+        )
+        
+        persona_label = ScoringService.get_persona_label(traveler_type)
+        
+        return FlightScore(
+            overall_score=new_overall,
+            dimensions=original_score.dimensions,
+            economy_dimensions=original_score.economy_dimensions,
+            business_dimensions=original_score.business_dimensions,
+            highlights=original_score.highlights,
+            explanations=original_score.explanations,
+            service_highlights=original_score.service_highlights,
+            user_reviews=original_score.user_reviews,
+            persona_weights_applied=persona_label
+        )
     
     def get_flight_detail(self, flight_id: str) -> Optional[FlightDetail]:
         """获取航班详情"""

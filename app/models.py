@@ -88,6 +88,9 @@ class Flight(BaseModel):
     # Booking and purchase link token
     booking_token: Optional[str] = Field(default=None, alias="bookingToken")
     
+    # Departure token for round trip - used to fetch return flights
+    departure_token: Optional[str] = Field(default=None, alias="departureToken")
+    
     # Airline branding
     airline_logo: Optional[str] = Field(default=None, alias="airlineLogo")
     
@@ -302,6 +305,9 @@ class SearchMeta(BaseModel):
     cached_at: Optional[datetime] = Field(default=None, alias="cachedAt")
     restricted_count: int = Field(default=0, alias="restrictedCount")
     is_authenticated: bool = Field(default=False, alias="isAuthenticated")
+    limit: int = Field(default=40, alias="limit")
+    offset: int = Field(default=0, alias="offset")
+    has_more: bool = Field(default=False, alias="hasMore")
 
     class Config:
         populate_by_name = True
@@ -323,6 +329,18 @@ class FlightSearchResponse(BaseModel):
     flights: List[FlightWithScore]
     meta: SearchMeta
     price_insights: Optional[PriceInsights] = Field(default=None, alias="priceInsights")
+    
+    class Config:
+        populate_by_name = True
+
+
+class RoundTripSearchResponse(BaseModel):
+    """Round trip search response with separate departure and return flights"""
+    departure_flights: List[FlightWithScore] = Field(alias="departureFlights")
+    return_flights: List[FlightWithScore] = Field(alias="returnFlights")
+    meta: SearchMeta
+    departure_price_insights: Optional[PriceInsights] = Field(default=None, alias="departurePriceInsights")
+    return_price_insights: Optional[PriceInsights] = Field(default=None, alias="returnPriceInsights")
     
     class Config:
         populate_by_name = True
@@ -379,6 +397,27 @@ class UserLogin(BaseModel):
     """User login request"""
     email: EmailStr
     password: str
+
+
+class VerificationRequest(BaseModel):
+    """Email verification code submission"""
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+
+
+class ResendVerificationRequest(BaseModel):
+    """Request to resend verification code"""
+    email: EmailStr
+
+
+class VerificationResponse(BaseModel):
+    """Response for verification initiation"""
+    message: str
+    email: str
+    expires_in_minutes: int = Field(alias="expiresInMinutes")
+    
+    class Config:
+        populate_by_name = True
 
 
 class UserUpdate(BaseModel):

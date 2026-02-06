@@ -367,5 +367,5 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 </p>
 
 <p align="center">
-  <a href="https://github.com/stevenyi0526-glitch/AirEase">⭐ Star us on GitHub</a>
+  <a href="https://github.com/stevenyi0526-glitch/AirEaseWeb">⭐ Star us on GitHub</a>
 </p>

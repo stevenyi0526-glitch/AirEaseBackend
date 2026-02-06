@@ -95,9 +95,13 @@ class AirlineReliabilityService:
             else:
                 base_score = max(2.0, otp / 15)       # Below 60% -> 2.0-4.0
         
-        # Apply penalty for often delayed flights (-1.0, minimum score 2.0)
+        # Apply SIGNIFICANT penalty for often delayed flights
+        # SerpAPI "often_delayed_by_over_30_min" is highly reliable data from Google Flights
+        # A flight marked as often delayed should get a poor reliability score
         if often_delayed:
-            base_score = max(2.0, base_score - 1.0)
+            # Major penalty: subtract 3.0 points and cap at 5.0 maximum
+            # This ensures often-delayed flights never appear as "reliable"
+            base_score = min(5.0, max(2.0, base_score - 3.0))
         
         return round(min(10.0, base_score), 1)
     

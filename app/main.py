@@ -19,6 +19,9 @@ from app.routes.airports import router as airports_router
 from app.routes.recommendations import router as recommendations_router
 from app.routes.reports import router as reports_router
 from app.routes.booking import router as booking_router
+from app.routes.autocomplete import router as autocomplete_router
+from app.routes.price_insights import router as price_insights_router
+from app.routes.user_preferences import router as user_preferences_router
 from app.database import init_db
 
 
@@ -28,6 +31,7 @@ async def lifespan(app: FastAPI):
     # Startup
     print("🛫 AirEase Backend starting...")
     print(f"   Debug mode: {settings.debug}")
+    print(f"   SerpAPI (Flights/Autocomplete/Price): {'✓ configured' if settings.serpapi_key else '✗ not configured'}")
     print(f"   Gemini API: {'✓ configured' if settings.gemini_api_key else '✗ not configured'}")
     print(f"   Amadeus API: {'✓ configured' if settings.amadeus_api_key else '✗ not configured'}")
     print(f"   Google Places API: {'✓ configured' if settings.google_places_api_key else '✗ not configured (using local fallback)'}")
@@ -114,10 +118,13 @@ app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(cities_router)
 app.include_router(airports_router)
+app.include_router(autocomplete_router)
 app.include_router(flights_router)
 app.include_router(booking_router)
+app.include_router(price_insights_router)
 app.include_router(ai_router)
 app.include_router(recommendations_router)
+app.include_router(user_preferences_router)
 app.include_router(reports_router)
 
 

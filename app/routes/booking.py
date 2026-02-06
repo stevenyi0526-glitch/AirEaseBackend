@@ -35,6 +35,22 @@ async def redirect_to_booking(
         ...,
         description="Booking token from flight search results"
     ),
+    departure_id: Optional[str] = Query(
+        None,
+        description="Departure airport code (e.g., 'JFK', 'LAX')"
+    ),
+    arrival_id: Optional[str] = Query(
+        None,
+        description="Arrival airport code (e.g., 'SFO', 'ORD')"
+    ),
+    outbound_date: Optional[str] = Query(
+        None,
+        description="Outbound flight date in YYYY-MM-DD format"
+    ),
+    return_date: Optional[str] = Query(
+        None,
+        description="Return flight date in YYYY-MM-DD format (for round trips)"
+    ),
     airline_name: Optional[str] = Query(
         None,
         description="Preferred airline name to match (e.g., 'Delta', 'United'). Falls back to first available if not matched."
@@ -83,7 +99,11 @@ async def redirect_to_booking(
     try:
         # Step 1: Fetch booking options from SerpAPI
         serpapi_response = await booking_redirect_service.get_booking_options(
-            booking_token=booking_token
+            booking_token=booking_token,
+            departure_id=departure_id,
+            arrival_id=arrival_id,
+            outbound_date=outbound_date,
+            return_date=return_date
         )
         
         # Check for API errors

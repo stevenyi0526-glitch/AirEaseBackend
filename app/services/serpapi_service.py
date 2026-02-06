@@ -168,16 +168,45 @@ class SerpAPIFlightService:
         
         price_insights = serpapi_response.get("price_insights")
         
+        # FIRST PASS: Parse all flights and collect durations
+        parsed_flights_data = []
         for idx, flight_data in enumerate(all_flights):
             try:
                 parsed_flight = self._parse_single_flight(
                     flight_data, idx, cabin_filter, price_insights, traveler_type
                 )
                 if parsed_flight:
-                    flights_list.append(parsed_flight)
+                    parsed_flights_data.append((parsed_flight, flight_data))
             except Exception as e:
                 print(f"Error parsing flight {idx}: {e}")
                 continue
+        
+        # Find the SHORTEST flight duration for this route
+        # This will be used as the baseline (10/10) for efficiency scoring
+        shortest_duration = None
+        if parsed_flights_data:
+            durations = [fws.flight.duration_minutes for fws, _ in parsed_flights_data if fws.flight.duration_minutes]
+            if durations:
+                shortest_duration = min(durations)
+        
+        # SECOND PASS: Recalculate scores with shortest_duration baseline
+        for fws, flight_data in parsed_flights_data:
+            # Recalculate the score with shortest_duration for proper efficiency scoring
+            recalculated_score = self._generate_score_from_serpapi(
+                flight_data=flight_data,
+                facilities=fws.facilities,
+                carbon_data=fws.flight.carbon_emissions or {},
+                first_segment=flight_data.get("flights", [{}])[0],
+                price_insights=price_insights,
+                aircraft_model=fws.flight.aircraft_model,
+                cabin_class=cabin_filter,
+                airline_name=fws.flight.airline,
+                traveler_type=traveler_type,
+                shortest_duration=shortest_duration  # NEW: Pass shortest duration
+            )
+            # Update the score
+            fws.score = recalculated_score
+            flights_list.append(fws)
         
         # SMART SORTING based on traveler type:
         # - Students: Sort by PRICE (ascending) - cheapest flights first!
@@ -671,7 +700,8 @@ class SerpAPIFlightService:
         aircraft_model: str = None,
         cabin_class: str = "Economy",
         airline_name: str = None,
-        traveler_type: str = "default"
+        traveler_type: str = "default",
+        shortest_duration: Optional[int] = None  # NEW: Shortest flight time for this route
     ) -> FlightScore:
         """
         Generate flight score based on SerpAPI data, aircraft comfort database, and airline reviews.
@@ -682,6 +712,8 @@ class SerpAPIFlightService:
                 - "business": Prioritizes reliability (30%) and service (20%)
                 - "family": Prioritizes comfort (25%) and service (25%)
                 - "default": Balanced weights across all dimensions
+            shortest_duration: Shortest flight duration for this route in minutes.
+                Used as baseline (10/10) for efficiency scoring.
         """
         
         # Extract airline info
@@ -735,37 +767,10 @@ class SerpAPIFlightService:
             cabin_class="business"
         )
         
-        # Get user reviews
-        user_reviews_raw = AirlineReviewsService.get_user_reviews(
-            airline_name=airline,
-            cabin_class=cabin_class,
-            limit=10
-        )
-        
-        # Convert to API model with nested ratings object
-        user_reviews = [
-            UserReviewSummary(
-                title=r.title,
-                review=r.review[:500] if len(r.review) > 500 else r.review,  # Truncate long reviews
-                food_rating=r.food_rating,
-                ground_service_rating=r.ground_service_rating,
-                seat_comfort_rating=r.seat_comfort_rating,
-                service_rating=r.service_rating,
-                recommended=r.recommended,
-                travel_type=r.travel_type,
-                route=r.route,
-                aircraft=r.aircraft,
-                cabin_type=r.cabin_type,
-                ratings=UserReviewRatings(
-                    food=r.food_rating,
-                    ground_service=r.ground_service_rating,
-                    seat_comfort=r.seat_comfort_rating,
-                    service=r.service_rating,
-                    overall=round((r.food_rating + r.ground_service_rating + r.seat_comfort_rating + r.service_rating) / 4, 1) if r.food_rating else None
-                )
-            )
-            for r in user_reviews_raw
-        ]
+        # User reviews are NOT fetched during initial parsing for performance
+        # They will be fetched on-demand when user selects a specific flight
+        # This saves ~38ms per flight (2.8-4s total for 74 flights)
+        user_reviews = []
         
         # Determine which comfort/service to use based on selected cabin class
         is_business = "business" in cabin_class.lower() or "first" in cabin_class.lower()
@@ -818,6 +823,7 @@ class SerpAPIFlightService:
             has_meal=facilities.meal_included or False,
             stops=stops,
             duration_minutes=duration_minutes,
+            shortest_duration=shortest_duration,  # Pass shortest duration for efficiency calculation
             apply_boost=True
         )
         
@@ -834,6 +840,7 @@ class SerpAPIFlightService:
             has_meal=facilities.meal_included or False,
             stops=stops,
             duration_minutes=duration_minutes,
+            shortest_duration=shortest_duration,  # Pass shortest duration for efficiency calculation
             apply_boost=True
         )
         
@@ -849,6 +856,7 @@ class SerpAPIFlightService:
             has_meal=facilities.meal_included or False,  # Use actual SerpAPI data
             stops=stops,
             duration_minutes=duration_minutes,
+            shortest_duration=shortest_duration,  # Pass shortest duration for efficiency calculation
             apply_boost=True
         )
         
@@ -856,6 +864,8 @@ class SerpAPIFlightService:
         persona_label = ScoringService.get_persona_label(traveler_type)
         
         # Build highlights
+        # IMPORTANT: If often_delayed is True from SerpAPI, do NOT show on-time highlights
+        # SerpAPI "often_delayed" is highly reliable data from Google Flights and takes priority
         highlights = []
         if stops == 0:
             highlights.append("Direct flight")
@@ -868,7 +878,9 @@ class SerpAPIFlightService:
             if price_level == "low":
                 highlights.append("💰 Low price!")
         
-        if airline_otp and airline_otp >= 85:
+        # ONLY show on-time rate if flight is NOT often delayed
+        # SerpAPI often_delayed flag overrides airline OTP data
+        if airline_otp and airline_otp >= 85 and not often_delayed:
             highlights.append(f"{airline_otp:.0f}% on-time rate")
         
         if facilities.has_wifi:
@@ -882,8 +894,10 @@ class SerpAPIFlightService:
         if carbon_diff < -5:
             highlights.append(f"{abs(carbon_diff)}% less emissions")
         
+        # Add delay warning PROMINENTLY for often delayed flights
         if often_delayed:
-            highlights.append("⚠️ Often delayed 30+ min")
+            # Insert at beginning to make it visible
+            highlights.insert(0, "⚠️ Often delayed 30+ min")
         
         # Build explanations
         explanations = []
@@ -1079,5 +1093,298 @@ def get_airport_code(city_name: str) -> str:
     return CITY_TO_AIRPORT_CODE.get(city_lower, city_name.upper()[:3])
 
 
-# Singleton instance
+# ============================================================
+# Autocomplete Service
+# ============================================================
+
+class SerpAPIAutocompleteService:
+    """
+    SerpAPI Google Flights Autocomplete Service
+    
+    Provides location suggestions as users type, returning:
+    - Cities with their airports
+    - Regions (countries, areas)
+    - Airport details with IATA codes
+    
+    API Docs: https://serpapi.com/google-flights-autocomplete-api
+    """
+    
+    BASE_URL = "https://serpapi.com/search"
+    
+    def __init__(self):
+        self.api_key = settings.serpapi_key
+    
+    async def get_suggestions(
+        self,
+        query: str,
+        gl: str = "us",
+        hl: str = "en",
+        exclude_regions: bool = False
+    ) -> Dict[str, Any]:
+        """
+        Get location suggestions for a search query.
+        
+        Args:
+            query: Search text (e.g., "New", "Korea", "北京")
+            gl: Country code for localization (e.g., "us", "cn", "hk")
+            hl: Language code (e.g., "en", "zh-CN", "zh-TW")
+            exclude_regions: If True, exclude region-level locations (countries, areas)
+                           Only return cities with airports
+        
+        Returns:
+            Dict containing suggestions with:
+            - position: Ranking position
+            - name: Location name
+            - type: "city" or "region"
+            - description: Brief description
+            - id: Google Knowledge Graph ID
+            - airports: List of airports (for cities)
+              - name: Airport name
+              - id: IATA code
+              - city: City name
+              - distance: Distance from city center
+        
+        Example Response:
+        {
+            "suggestions": [
+                {
+                    "position": 1,
+                    "name": "Seoul, South Korea",
+                    "type": "city",
+                    "description": "Capital of South Korea",
+                    "id": "/m/0hsqf",
+                    "airports": [
+                        {"name": "Incheon International Airport", "id": "ICN", ...},
+                        {"name": "Gimpo International Airport", "id": "GMP", ...}
+                    ]
+                }
+            ]
+        }
+        """
+        if not self.api_key:
+            raise ValueError("SERPAPI_KEY not configured")
+        
+        params = {
+            "engine": "google_flights_autocomplete",
+            "q": query,
+            "gl": gl,
+            "hl": hl,
+            "api_key": self.api_key,
+        }
+        
+        if exclude_regions:
+            params["exclude_regions"] = "true"
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(self.BASE_URL, params=params)
+            response.raise_for_status()
+            return response.json()
+    
+    def parse_suggestions(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Parse autocomplete response into a clean list of suggestions.
+        
+        Returns a list of suggestion objects with normalized structure.
+        """
+        suggestions = response.get("suggestions", [])
+        parsed = []
+        
+        for suggestion in suggestions:
+            parsed_item = {
+                "position": suggestion.get("position"),
+                "name": suggestion.get("name"),
+                "type": suggestion.get("type"),  # "city" or "region"
+                "description": suggestion.get("description"),
+                "id": suggestion.get("id"),  # Google Knowledge Graph ID
+            }
+            
+            # Add airports if available (cities have airports, regions don't)
+            airports = suggestion.get("airports", [])
+            if airports:
+                parsed_item["airports"] = [
+                    {
+                        "name": airport.get("name"),
+                        "code": airport.get("id"),  # IATA code
+                        "city": airport.get("city"),
+                        "cityId": airport.get("city_id"),
+                        "distance": airport.get("distance"),
+                    }
+                    for airport in airports
+                ]
+            
+            parsed.append(parsed_item)
+        
+        return parsed
+
+
+# ============================================================
+# Price Insights Service
+# ============================================================
+
+class SerpAPIPriceInsightsService:
+    """
+    SerpAPI Google Flights Price Insights Service
+    
+    Provides price analysis for flight routes:
+    - Lowest available price
+    - Price level (low/typical/high)
+    - Typical price range
+    - Historical price data
+    
+    API Docs: https://serpapi.com/google-flights-price-insights
+    
+    Note: Price insights are returned as part of the regular Google Flights
+    search response. This service extracts and provides dedicated access
+    to that data.
+    """
+    
+    BASE_URL = "https://serpapi.com/search"
+    
+    def __init__(self):
+        self.api_key = settings.serpapi_key
+    
+    async def get_price_insights(
+        self,
+        departure_id: str,
+        arrival_id: str,
+        outbound_date: str,
+        return_date: Optional[str] = None,
+        currency: str = "USD",
+        hl: str = "en",
+        gl: str = "us",
+        travel_class: int = 1,
+        adults: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Get price insights for a flight route.
+        
+        Args:
+            departure_id: Departure airport IATA code (e.g., "JFK", "HKG")
+            arrival_id: Arrival airport IATA code (e.g., "LAX", "NRT")
+            outbound_date: Departure date (YYYY-MM-DD)
+            return_date: Return date for round trips (YYYY-MM-DD, optional)
+            currency: Currency code (e.g., "USD", "EUR", "CNY")
+            hl: Language code
+            gl: Country code
+            travel_class: 1=Economy, 2=Premium Economy, 3=Business, 4=First
+            adults: Number of passengers
+        
+        Returns:
+            Price insights data:
+            {
+                "lowest_price": 450,
+                "price_level": "typical",  // "low", "typical", "high"
+                "typical_price_range": [400, 600],
+                "price_history": [
+                    [1691013600, 575],  // [timestamp, price]
+                    [1691100000, 590],
+                    ...
+                ]
+            }
+        """
+        if not self.api_key:
+            raise ValueError("SERPAPI_KEY not configured")
+        
+        params = {
+            "engine": "google_flights",
+            "departure_id": departure_id,
+            "arrival_id": arrival_id,
+            "outbound_date": outbound_date,
+            "currency": currency,
+            "hl": hl,
+            "gl": gl,
+            "travel_class": travel_class,
+            "adults": adults,
+            "api_key": self.api_key,
+        }
+        
+        # Set trip type
+        if return_date:
+            params["type"] = "1"  # Round trip
+            params["return_date"] = return_date
+        else:
+            params["type"] = "2"  # One way
+        
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(self.BASE_URL, params=params)
+            response.raise_for_status()
+            data = response.json()
+        
+        # Extract price_insights from the response
+        price_insights = data.get("price_insights", {})
+        
+        return {
+            "route": {
+                "departure": departure_id,
+                "arrival": arrival_id,
+                "outbound_date": outbound_date,
+                "return_date": return_date,
+            },
+            "price_insights": price_insights,
+            "search_metadata": data.get("search_metadata", {}),
+        }
+    
+    def parse_price_insights(self, price_insights: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Parse raw price insights into a user-friendly format.
+        
+        Returns:
+            {
+                "lowestPrice": 450,
+                "priceLevel": "typical",
+                "priceLevelDescription": "Prices are typical for this route",
+                "typicalPriceRange": {"low": 400, "high": 600},
+                "priceHistory": [
+                    {"date": "2024-08-03", "price": 575},
+                    ...
+                ]
+            }
+        """
+        if not price_insights:
+            return None
+        
+        # Parse price level description
+        price_level = price_insights.get("price_level", "unknown")
+        level_descriptions = {
+            "low": "Prices are lower than usual for this route",
+            "typical": "Prices are typical for this route",
+            "high": "Prices are higher than usual for this route",
+        }
+        
+        # Parse typical price range
+        typical_range = price_insights.get("typical_price_range", [])
+        range_obj = None
+        if len(typical_range) >= 2:
+            range_obj = {
+                "low": typical_range[0],
+                "high": typical_range[1],
+            }
+        
+        # Parse price history (convert timestamps to dates)
+        raw_history = price_insights.get("price_history", [])
+        parsed_history = []
+        for entry in raw_history:
+            if len(entry) >= 2:
+                timestamp, price = entry[0], entry[1]
+                try:
+                    date_obj = datetime.fromtimestamp(timestamp)
+                    parsed_history.append({
+                        "date": date_obj.strftime("%Y-%m-%d"),
+                        "price": price,
+                    })
+                except (ValueError, OSError):
+                    continue
+        
+        return {
+            "lowestPrice": price_insights.get("lowest_price"),
+            "priceLevel": price_level,
+            "priceLevelDescription": level_descriptions.get(price_level, "Price level unknown"),
+            "typicalPriceRange": range_obj,
+            "priceHistory": parsed_history,
+        }
+
+
+# Singleton instances
 serpapi_flight_service = SerpAPIFlightService()
+serpapi_autocomplete_service = SerpAPIAutocompleteService()
+serpapi_price_insights_service = SerpAPIPriceInsightsService()

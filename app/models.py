@@ -729,3 +729,90 @@ class ReportCategoryInfo(BaseModel):
     
     class Config:
         populate_by_name = True
+
+
+# ============================================================
+# Autocomplete Models (地点自动补全)
+# ============================================================
+
+class AirportSuggestion(BaseModel):
+    """机场建议"""
+    name: str
+    code: str  # IATA code
+    city: Optional[str] = None
+    city_id: Optional[str] = Field(default=None, alias="cityId")
+    distance: Optional[str] = None  # Distance from city center
+    
+    class Config:
+        populate_by_name = True
+
+
+class LocationSuggestion(BaseModel):
+    """位置建议（城市、地区或机场）"""
+    position: int
+    name: str
+    type: Optional[str] = None  # "city", "region", or None for direct airport matches
+    description: Optional[str] = None
+    id: Optional[str] = None  # Google Knowledge Graph ID
+    airports: Optional[List[AirportSuggestion]] = None
+    
+    class Config:
+        populate_by_name = True
+
+
+class AutocompleteResponse(BaseModel):
+    """自动补全响应"""
+    query: str
+    suggestions: List[LocationSuggestion]
+    
+    class Config:
+        populate_by_name = True
+
+
+# ============================================================
+# Price Insights Models (价格洞察)
+# ============================================================
+
+class PriceRange(BaseModel):
+    """价格区间"""
+    low: int
+    high: int
+
+
+class PriceHistoryPoint(BaseModel):
+    """历史价格点"""
+    date: str  # YYYY-MM-DD
+    price: int
+
+
+class PriceInsightsData(BaseModel):
+    """价格洞察数据"""
+    lowest_price: Optional[int] = Field(default=None, alias="lowestPrice")
+    price_level: Optional[str] = Field(default=None, alias="priceLevel")  # "low", "typical", "high"
+    price_level_description: Optional[str] = Field(default=None, alias="priceLevelDescription")
+    typical_price_range: Optional[PriceRange] = Field(default=None, alias="typicalPriceRange")
+    price_history: Optional[List[PriceHistoryPoint]] = Field(default=None, alias="priceHistory")
+    
+    class Config:
+        populate_by_name = True
+
+
+class RouteInfo(BaseModel):
+    """航线信息"""
+    departure: str
+    arrival: str
+    outbound_date: str = Field(alias="outboundDate")
+    return_date: Optional[str] = Field(default=None, alias="returnDate")
+    
+    class Config:
+        populate_by_name = True
+
+
+class PriceInsightsResponse(BaseModel):
+    """价格洞察响应"""
+    route: RouteInfo
+    insights: Optional[PriceInsightsData] = None
+    currency: str = "USD"
+    
+    class Config:
+        populate_by_name = True

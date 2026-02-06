@@ -1,6 +1,8 @@
 """
 AirEase Backend - Smart Flight Recommendation Service
 AI-powered flight recommendations based on user behavior
+
+Uses UserPreferencesService for preference data with Pandas preprocessing.
 """
 
 import json
@@ -11,6 +13,7 @@ from sqlalchemy import func, desc
 
 from app.database import UserDB, SearchHistoryDB
 from app.services.gemini_service import GeminiService
+from app.services.user_preferences_service import user_preferences_service
 
 
 class RecommendationService:
@@ -39,43 +42,48 @@ class RecommendationService:
     
     def get_user_preferences(self, db: Session, user_id: int) -> Dict[str, Any]:
         """
-        Analyze user's search history and sort preferences to build a preference profile.
+        Get user preferences from the new UserPreferencesService.
+        
+        This method now uses the cached preferences aggregated with Pandas,
+        which includes data from:
+        - Sort actions (track_sort_action)
+        - Time filter actions (track_time_filter)
+        - Flight selections (track_flight_selection)
         
         Returns:
         {
-            "top_routes": [{"from": "HKG", "to": "NRT", "count": 15}, ...],
-            "time_range_preferences": {"8-12": 10, "16-20": 8, ...},
-            "sort_preferences": {"overall": 5, "price": 12, "comfort": 3, ...},
             "preferred_sort": "price",
-            "preferred_time_range": "8-12"
+            "preferred_time_range": "6-12",
+            "preferred_airlines": ["CX", "HX"],
+            "price_sensitivity": "high",
+            "time_range_preferences": {"6-12": 10, "12-18": 8, ...},
+            "sort_preferences": {"price": 12, "duration": 5, ...},
+            "user_label": "business"
         }
         """
         user = db.query(UserDB).filter(UserDB.user_id == user_id).first()
         if not user:
             return self._get_default_preferences()
         
-        # 1. Get top routes from search history
-        top_routes = self._get_top_routes(db, user_id)
+        # Get preferences from the new service (uses cached Pandas aggregations)
+        cached_prefs = user_preferences_service.get_user_preferences(db, user_id)
         
-        # 2. Get time range preferences from search history
-        time_range_prefs = self._get_time_range_preferences(db, user_id)
-        
-        # 3. Get sort preferences from user table
-        sort_prefs = self._get_sort_preferences(user)
-        
-        # 4. Determine the most preferred sort dimension
-        preferred_sort = max(sort_prefs.items(), key=lambda x: x[1])[0] if any(sort_prefs.values()) else "overall"
-        
-        # 5. Determine the most preferred time range
-        preferred_time_range = max(time_range_prefs.items(), key=lambda x: x[1])[0] if any(time_range_prefs.values()) else "8-12"
-        
+        # Map to the format expected by the recommendation system
         return {
-            "top_routes": top_routes,
-            "time_range_preferences": time_range_prefs,
-            "sort_preferences": sort_prefs,
-            "preferred_sort": preferred_sort,
-            "preferred_time_range": preferred_time_range,
+            # From new preferences cache
+            "preferred_sort": cached_prefs.get("preferred_sort", "score"),
+            "preferred_time_range": cached_prefs.get("preferred_time_range", "6-12"),
+            "preferred_airlines": cached_prefs.get("preferred_airlines", []),
+            "price_sensitivity": cached_prefs.get("price_sensitivity", "medium"),
+            "time_range_preferences": cached_prefs.get("time_range_counts", {}),
+            "sort_preferences": cached_prefs.get("sort_counts", {}),
+            "has_preferences": cached_prefs.get("has_preferences", False),
+            
+            # User profile info
             "user_label": user.user_label or "business",
+            
+            # Legacy: top_routes from search history (for backward compatibility)
+            "top_routes": self._get_top_routes(db, user_id),
         }
     
     def _get_top_routes(self, db: Session, user_id: int, limit: int = 3) -> List[Dict[str, Any]]:
@@ -190,19 +198,31 @@ class RecommendationService:
         3. Sort preference alignment (+25 points)
         4. User label (business/student/family) alignment (+15 points)
         5. Overall score normalization (+10 points)
+        6. Preferred airline match (+15 points) - NEW
         """
         if not flights:
             return []
         
         scored_flights = []
         
-        preferred_time_range = preferences.get("preferred_time_range", "8-12")
-        preferred_sort = preferences.get("preferred_sort", "overall")
+        preferred_time_range = preferences.get("preferred_time_range", "6-12")
+        preferred_sort = preferences.get("preferred_sort", "score")
         user_label = preferences.get("user_label", "business")
         top_routes = preferences.get("top_routes", [])
+        preferred_airlines = preferences.get("preferred_airlines", [])
+        price_sensitivity = preferences.get("price_sensitivity", "medium")
         
-        # Get time range bounds
-        time_start, time_end = self.TIME_RANGES.get(preferred_time_range, (8, 12))
+        # Get time range bounds - normalize format
+        time_range_normalized = preferred_time_range.replace(" ", "")
+        if time_range_normalized in self.TIME_RANGES:
+            time_start, time_end = self.TIME_RANGES[time_range_normalized]
+        else:
+            # Try parsing "6-12" format
+            try:
+                parts = time_range_normalized.split("-")
+                time_start, time_end = int(parts[0]), int(parts[1])
+            except:
+                time_start, time_end = 6, 12  # Default morning
         
         for flight in flights:
             score = 0
@@ -235,9 +255,19 @@ class RecommendationService:
                 
                 if time_start <= hour < time_end:
                     score += 20
-                    reasons.append(f"Departs in your preferred time ({preferred_time_range})")
+                    reasons.append(f"Departs in your preferred time ({time_start}-{time_end})")
             
-            # 3. Sort preference alignment
+            # 3. Preferred airline match (NEW)
+            airline = flight_data.get("airline", "")
+            airline_code = flight_data.get("airlineCode") or flight_data.get("airline_code", "")
+            if preferred_airlines:
+                for i, pref_airline in enumerate(preferred_airlines[:3]):
+                    if pref_airline.lower() in airline.lower() or pref_airline.upper() == airline_code.upper():
+                        score += 15 - (i * 3)  # Top airline +15, second +12, third +9
+                        reasons.append(f"Your preferred airline")
+                        break
+            
+            # 4. Sort preference alignment
             if preferred_sort == "price":
                 # Lower price = higher score
                 price = flight_data.get("price", 0)
@@ -247,7 +277,7 @@ class RecommendationService:
                     score += price_score
                     if price_score > 15:
                         reasons.append("Great price match")
-            elif preferred_sort == "overall":
+            elif preferred_sort in ["overall", "score"]:
                 overall = score_data.get("overallScore", 70)
                 score += (overall / 100) * 25
                 if overall >= 80:

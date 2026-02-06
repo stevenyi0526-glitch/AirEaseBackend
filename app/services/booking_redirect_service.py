@@ -10,6 +10,83 @@ from urllib.parse import urlencode
 from app.config import settings
 
 
+# Common airline name mappings for better matching
+# Maps short names/codes to possible full names
+AIRLINE_NAME_MAPPINGS = {
+    "ana": ["all nippon", "all nippon airways", "ana"],
+    "jal": ["japan airlines", "jal"],
+    "delta": ["delta", "delta air lines"],
+    "united": ["united", "united airlines"],
+    "american": ["american", "american airlines"],
+    "southwest": ["southwest", "southwest airlines"],
+    "british airways": ["british airways", "ba"],
+    "lufthansa": ["lufthansa", "lh"],
+    "air france": ["air france", "af"],
+    "klm": ["klm", "klm royal dutch"],
+    "cathay": ["cathay", "cathay pacific"],
+    "singapore": ["singapore", "singapore airlines"],
+    "emirates": ["emirates"],
+    "qatar": ["qatar", "qatar airways"],
+    "etihad": ["etihad", "etihad airways"],
+}
+
+# Airport code to country code mapping for geolocation
+# This helps SerpAPI return the correct booking options for the user's region
+AIRPORT_COUNTRY_CODES = {
+    # Hong Kong
+    "HKG": "hk",
+    # Japan
+    "NRT": "jp", "HND": "jp", "KIX": "jp", "ITM": "jp", "CTS": "jp", "FUK": "jp", "NGO": "jp", "OKA": "jp",
+    # China
+    "PEK": "cn", "PVG": "cn", "SHA": "cn", "CAN": "cn", "SZX": "cn", "CTU": "cn", "XIY": "cn", "HGH": "cn",
+    # Taiwan
+    "TPE": "tw", "KHH": "tw", "TSA": "tw",
+    # Singapore
+    "SIN": "sg",
+    # South Korea
+    "ICN": "kr", "GMP": "kr", "PUS": "kr",
+    # Thailand
+    "BKK": "th", "DMK": "th", "HKT": "th", "CNX": "th",
+    # USA
+    "JFK": "us", "LAX": "us", "SFO": "us", "ORD": "us", "MIA": "us", "ATL": "us", "DFW": "us", "SEA": "us", "BOS": "us", "DEN": "us", "IAH": "us", "EWR": "us", "LGA": "us", "PHX": "us", "SAN": "us", "IAD": "us", "DCA": "us",
+    # UK
+    "LHR": "uk", "LGW": "uk", "STN": "uk", "MAN": "uk", "EDI": "uk",
+    # France
+    "CDG": "fr", "ORY": "fr", "NCE": "fr", "LYS": "fr",
+    # Germany
+    "FRA": "de", "MUC": "de", "TXL": "de", "BER": "de", "DUS": "de", "HAM": "de",
+    # Australia
+    "SYD": "au", "MEL": "au", "BNE": "au", "PER": "au",
+    # UAE
+    "DXB": "ae", "AUH": "ae",
+    # India
+    "DEL": "in", "BOM": "in", "BLR": "in", "MAA": "in", "CCU": "in", "HYD": "in",
+    # Canada
+    "YYZ": "ca", "YVR": "ca", "YUL": "ca", "YYC": "ca",
+}
+
+
+def _get_country_code_for_airport(airport_code: str) -> str:
+    """Get the country code for an airport, defaults to 'us'."""
+    return AIRPORT_COUNTRY_CODES.get(airport_code.upper(), "us") if airport_code else "us"
+
+
+def _normalize_airline_name(name: str) -> list:
+    """
+    Get possible name variations for an airline.
+    Returns a list of lowercase name variations to match against.
+    """
+    name_lower = name.lower().strip()
+    
+    # Check if we have predefined mappings
+    for key, variations in AIRLINE_NAME_MAPPINGS.items():
+        if name_lower in variations or key in name_lower:
+            return variations + [name_lower]
+    
+    # Return the original name if no mapping found
+    return [name_lower]
+
+
 class BookingRedirectService:
     """
     Service for handling flight booking redirects.
@@ -25,24 +102,55 @@ class BookingRedirectService:
     
     async def get_booking_options(
         self,
-        booking_token: str
+        booking_token: str,
+        departure_id: Optional[str] = None,
+        arrival_id: Optional[str] = None,
+        outbound_date: Optional[str] = None,
+        return_date: Optional[str] = None,
+        currency: str = "USD"
     ) -> Dict[str, Any]:
         """
         Fetch booking options from SerpAPI using a booking_token.
         
+        The booking_token requires the original search context to work properly.
+        If departure_id/arrival_id/outbound_date are not provided, they will be
+        extracted from the booking_token if possible.
+        
         Args:
             booking_token: The booking token from a flight search result
+            departure_id: Original departure airport code
+            arrival_id: Original arrival airport code
+            outbound_date: Original departure date (YYYY-MM-DD)
+            return_date: Optional return date for round trips
+            currency: Currency code
         
         Returns:
             SerpAPI response containing booking_options
         """
+        # Determine geolocation based on departure airport
+        gl = _get_country_code_for_airport(departure_id) if departure_id else "us"
+        
         params = {
             "engine": "google_flights",
             "booking_token": booking_token,
             "api_key": self.api_key,
             "hl": "en",
-            "gl": "us",
+            "gl": gl,
+            "currency": currency,
         }
+        
+        # Add route context if provided
+        if departure_id:
+            params["departure_id"] = departure_id
+        if arrival_id:
+            params["arrival_id"] = arrival_id
+        if outbound_date:
+            params["outbound_date"] = outbound_date
+        if return_date:
+            params["return_date"] = return_date
+            params["type"] = "1"  # Round trip
+        else:
+            params["type"] = "2"  # One way
         
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.get(self.BASE_URL, params=params)
@@ -58,13 +166,14 @@ class BookingRedirectService:
         Find the best matching booking option.
         
         Priority:
-        1. Match by airline_name if provided
-        2. Prefer direct airline options (airline=True)
-        3. Fall back to first available option
+        1. Official airline website (airline=True) matching the airline_name
+        2. Any official airline website (airline=True)
+        3. Third-party seller matching the airline_name
+        4. Fall back to first available option
         
         Args:
             booking_options: List of booking options from SerpAPI
-            airline_name: Optional airline name to match
+            airline_name: Optional airline name to match (e.g., "ANA", "Delta")
         
         Returns:
             The selected booking option, or None if not found
@@ -72,24 +181,39 @@ class BookingRedirectService:
         if not booking_options:
             return None
         
-        # Normalize airline name for matching
-        search_name = airline_name.lower() if airline_name else None
+        # Get name variations for matching
+        search_names = _normalize_airline_name(airline_name) if airline_name else []
         
-        # First pass: look for exact airline match in "together" option
-        if search_name:
+        def _matches_airline(book_with: str) -> bool:
+            """Check if book_with matches any of the search name variations."""
+            book_with_lower = book_with.lower()
+            return any(name in book_with_lower for name in search_names)
+        
+        # First priority: Official airline website matching the airline name
+        if search_names:
             for option in booking_options:
                 together = option.get("together", {})
-                book_with = together.get("book_with", "").lower()
+                book_with = together.get("book_with", "")
+                is_official_airline = together.get("airline", False)
                 
-                # Check if the seller name contains the airline name
-                if search_name in book_with:
+                # Prefer official airline booking that matches the airline name
+                if is_official_airline and _matches_airline(book_with):
                     return option
         
-        # Second pass: prefer direct airline options (airline=True)
+        # Second priority: Any official airline website (airline=True)
         for option in booking_options:
             together = option.get("together", {})
             if together.get("airline", False):
                 return option
+        
+        # Third priority: Third-party seller matching airline name
+        if search_names:
+            for option in booking_options:
+                together = option.get("together", {})
+                book_with = together.get("book_with", "")
+                
+                if _matches_airline(book_with):
+                    return option
         
         # Fall back to first option
         return booking_options[0] if booking_options else None

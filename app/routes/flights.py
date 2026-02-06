@@ -21,8 +21,8 @@ from app.config import settings
 # Maximum number of results for non-authenticated users
 MAX_FREE_RESULTS = 3
 
-# Default page size for flight results
-DEFAULT_PAGE_SIZE = 40
+# Default page size for flight results - fetch all for accuracy
+DEFAULT_PAGE_SIZE = 200
 
 # Set to True to use SerpAPI (real data), False for mock data
 USE_SERPAPI = True
@@ -60,7 +60,7 @@ async def search_flights(
     stops: Optional[int] = Query(None, ge=0, le=3, description="经停：0=任意, 1=直飞, 2=1经停或更少, 3=2经停或更少"),
     sort_by: str = Query("score", description="排序方式：score/price/duration/departure/arrival"),
     traveler_type: str = Query("default", description="旅客类型：student/business/family/default - 影响评分权重"),
-    limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=100, description="每页返回数量，默认40，最大100"),
+    limit: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=500, description="每页返回数量，默认200，最大500"),
     offset: int = Query(0, ge=0, description="偏移量，用于分页加载更多"),
     authorization: Optional[str] = Header(None, description="JWT Bearer token")
 ):
@@ -243,12 +243,15 @@ async def search_roundtrip_flights(
         arrival_code = get_airport_code(to_city)
         travel_class = map_cabin_to_travel_class(cabin)
         
-        # Make two parallel one-way searches for individual prices
-        departure_search = serpapi_flight_service.search_flights(
+        # Execute BOTH searches in PARALLEL for speed:
+        # 1. Round-trip search: Gets departure flights + price_insights
+        # 2. One-way return search: Gets return flights
+        # This is faster than sequential and we get price_insights!
+        roundtrip_search = serpapi_flight_service.search_flights(
             departure_id=departure_code,
             arrival_id=arrival_code,
             outbound_date=date,
-            return_date=None,  # One-way search
+            return_date=return_date,  # Round-trip to get price_insights!
             travel_class=travel_class,
             adults=adults,
             currency=currency,
@@ -257,10 +260,10 @@ async def search_roundtrip_flights(
         )
         
         return_search = serpapi_flight_service.search_flights(
-            departure_id=arrival_code,  # Reversed
-            arrival_id=departure_code,   # Reversed
+            departure_id=arrival_code,  # Reversed for return leg
+            arrival_id=departure_code,
             outbound_date=return_date,
-            return_date=None,  # One-way search
+            return_date=None,  # One-way for individual return flight pricing
             travel_class=travel_class,
             adults=adults,
             currency=currency,
@@ -268,16 +271,18 @@ async def search_roundtrip_flights(
             traveler_type=traveler_type,
         )
         
-        # Execute both searches in parallel
-        departure_response, return_response = await asyncio.gather(
-            departure_search, return_search
+        # Execute both in parallel - much faster!
+        roundtrip_response, return_response = await asyncio.gather(
+            roundtrip_search, return_search
         )
         
         # Parse responses
-        departure_flights, dep_price_insights = serpapi_flight_service.parse_flight_response(
-            departure_response, cabin, traveler_type=traveler_type
+        # Round-trip response has departure flights + price_insights
+        departure_flights, price_insights = serpapi_flight_service.parse_flight_response(
+            roundtrip_response, cabin, traveler_type=traveler_type
         )
-        return_flights, ret_price_insights = serpapi_flight_service.parse_flight_response(
+        # One-way return response has return flights (with individual pricing)
+        return_flights, return_price_insights = serpapi_flight_service.parse_flight_response(
             return_response, cabin, traveler_type=traveler_type
         )
         
@@ -301,8 +306,10 @@ async def search_roundtrip_flights(
                 offset=0,
                 hasMore=False
             ),
-            departurePriceInsights=dep_price_insights,
-            returnPriceInsights=ret_price_insights
+            # Use price_insights from the round-trip search for departure
+            departurePriceInsights=price_insights,
+            # Return leg uses price insights from one-way (usually null)
+            returnPriceInsights=return_price_insights
         )
     
     except Exception as e:
@@ -387,6 +394,68 @@ async def get_return_flights(
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/reviews",
+    summary="获取航空公司评价",
+    description="根据航空公司名称获取用户评价，用于用户选择特定航班时按需加载"
+)
+async def get_airline_reviews(
+    airline: str = Query(..., description="航空公司名称 (e.g., 'Cathay Pacific', 'Japan Airlines')"),
+    cabin: str = Query("economy", description="舱位类型：economy/business"),
+    limit: int = Query(10, ge=1, le=50, description="返回评价数量")
+):
+    """
+    获取航空公司用户评价 - Get Airline User Reviews
+    
+    This endpoint is called on-demand when user selects a specific flight.
+    Reviews are NOT fetched during initial flight search to improve performance.
+    
+    - **airline**: Airline name
+    - **cabin**: Cabin class (economy/business)
+    - **limit**: Maximum number of reviews to return
+    
+    Returns list of user reviews with ratings
+    """
+    from app.services.airline_reviews_service import AirlineReviewsService
+    
+    reviews_raw = AirlineReviewsService.get_user_reviews(
+        airline_name=airline,
+        cabin_class=cabin,
+        limit=limit
+    )
+    
+    reviews = [
+        {
+            "title": r.title,
+            "review": r.review[:500] if len(r.review) > 500 else r.review,
+            "foodRating": r.food_rating,
+            "groundServiceRating": r.ground_service_rating,
+            "seatComfortRating": r.seat_comfort_rating,
+            "serviceRating": r.service_rating,
+            "recommended": r.recommended,
+            "travelType": r.travel_type,
+            "route": r.route,
+            "aircraft": r.aircraft,
+            "cabinType": r.cabin_type,
+            "ratings": {
+                "food": r.food_rating,
+                "groundService": r.ground_service_rating,
+                "seatComfort": r.seat_comfort_rating,
+                "service": r.service_rating,
+                "overall": round((r.food_rating + r.ground_service_rating + r.seat_comfort_rating + r.service_rating) / 4, 1) if r.food_rating else None
+            }
+        }
+        for r in reviews_raw
+    ]
+    
+    return {
+        "airline": airline,
+        "cabin": cabin,
+        "count": len(reviews),
+        "reviews": reviews
+    }
 
 
 @router.get(

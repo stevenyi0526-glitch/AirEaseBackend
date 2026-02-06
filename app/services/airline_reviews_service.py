@@ -205,6 +205,9 @@ class AirlineReviewsService:
         """
         Get individual user reviews for an airline.
         
+        NOTE: This performs a DB query and should only be called on-demand
+        when user selects a specific flight (not during initial parsing).
+        
         Args:
             airline_name: Airline name
             cabin_class: "economy" or "business"

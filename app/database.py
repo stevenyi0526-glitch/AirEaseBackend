@@ -205,6 +205,61 @@ class ReportDB(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class UserSortActionDB(Base):
+    """
+    Tracks user sort actions for preference learning.
+    Each time a user clicks a sort option, we record it.
+    """
+    __tablename__ = "user_sort_actions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    sort_dimension = Column(String(50), nullable=False)  # price, duration, score, departure, arrival
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserTimeFilterActionDB(Base):
+    """
+    Tracks user time filter actions for preference learning.
+    Records when users filter by departure time range.
+    """
+    __tablename__ = "user_time_filter_actions"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    time_range = Column(String(20), nullable=False)  # "0-6", "6-12", "12-18", "18-24"
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserPreferencesCacheDB(Base):
+    """
+    Cached/aggregated user preferences for fast recommendation lookups.
+    Updated periodically from tracking tables using Pandas aggregation.
+    """
+    __tablename__ = "user_preferences_cache"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    
+    # Aggregated preference data (computed from tracking tables)
+    time_range_preferences = Column(Text, nullable=True)  # JSONB: {"6-12": 15, "12-18": 8, ...}
+    preferred_sort_dimension = Column(String(50), nullable=True)  # Most frequent sort
+    preferred_airlines = Column(Text, nullable=True)  # JSONB: ["CX", "HX", "UO"]
+    price_sensitivity = Column(String(20), nullable=True)  # "high", "medium", "low"
+    
+    # Detailed counts for analysis
+    sort_counts = Column(Text, nullable=True)  # JSONB: {"price": 25, "duration": 10, ...}
+    time_range_counts = Column(Text, nullable=True)  # JSONB: {"6-12": 15, ...}
+    airline_counts = Column(Text, nullable=True)  # JSONB: {"CX": 10, "HX": 5, ...}
+    total_sort_actions = Column(Integer, default=0)
+    total_selections = Column(Integer, default=0)
+    
+    # Legacy field (to be removed)
+    top_routes = Column(Text, nullable=True)
+    
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ============================================================
 # Database Utilities
 # ============================================================

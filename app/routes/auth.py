@@ -89,7 +89,7 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
     User must call /verify-email with the code to complete registration.
     """
     # Check if email already exists
-    existing_user = db.query(UserDB).filter(UserDB.email == user_data.email).first()
+    existing_user = db.query(UserDB).filter(UserDB.user_email == user_data.email).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -165,7 +165,7 @@ async def verify_email(
         )
     
     # Double-check email doesn't exist (race condition protection)
-    existing_user = db.query(UserDB).filter(UserDB.email == verification.email).first()
+    existing_user = db.query(UserDB).filter(UserDB.user_email == verification.email).first()
     if existing_user:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

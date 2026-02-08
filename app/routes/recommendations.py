@@ -1,6 +1,11 @@
 """
 AirEase Backend - Recommendations Routes
-AI-powered flight recommendation endpoints
+Simplified AI-powered flight recommendation endpoints.
+
+3 Internal Questions:
+  Q1: What departure time does the user prefer?
+  Q2: What dimensions does the user prefer? (top 2 or top 1)
+  Q3: What specific airline does the user prefer?
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -131,14 +136,18 @@ async def generate_recommendations(
     """
     Generate AI recommendations from a list of flights.
     
-    This endpoint receives the search results and returns the top 3 recommended flights
-    based on user's preferences and history.
+    Uses the simplified 3-question approach:
+    Q1: Preferred departure time
+    Q2: Preferred dimensions (price/duration/comfort)
+    Q3: Preferred airline
+    
+    Returns top 3 recommended flights.
     """
     if not current_user:
-        # For non-authenticated users, return top 3 by overall score
+        # Non-authenticated: top 3 by overall score
         sorted_flights = sorted(
-            flights, 
-            key=lambda x: x.get("score", {}).get("overallScore", 0), 
+            flights,
+            key=lambda x: x.get("score", {}).get("overallScore", 0),
             reverse=True
         )
         return {
@@ -147,30 +156,26 @@ async def generate_recommendations(
             "preferences_used": {}
         }
     
-    # Get user preferences
-    preferences = recommendation_service.get_user_preferences(db, current_user.user_id)
+    # Get the 3 answers from user data
+    answers = recommendation_service.get_three_answers(db, current_user.user_id)
     
-    # Filter and rank recommendations
+    # Score and rank flights
     recommendations = recommendation_service.filter_and_rank_recommendations(
-        flights,
-        preferences,
-        {}  # search_params can be added if needed
+        flights, answers, {}
     )
     
-    # Generate AI explanation
-    explanation = await recommendation_service.generate_recommendation_explanation(
-        recommendations,
-        preferences
-    )
+    # Generate simple explanation (no API call)
+    explanation = recommendation_service.generate_explanation(answers)
     
     return {
         "recommendations": recommendations,
         "explanation": explanation,
         "preferences_used": {
-            "preferred_sort": preferences.get("preferred_sort"),
-            "preferred_time_range": preferences.get("preferred_time_range"),
-            "user_label": preferences.get("user_label"),
-            "top_routes_count": len(preferences.get("top_routes", [])),
+            "preferred_time": answers.get("preferred_time"),
+            "preferred_dimensions": answers.get("preferred_dimensions"),
+            "preferred_airline": answers.get("preferred_airline"),
+            "user_label": answers.get("user_label"),
+            "has_data": answers.get("has_data"),
         }
     }
 
@@ -184,7 +189,7 @@ async def get_quick_recommendations(
 ):
     """
     Get quick recommendation hints for a route.
-    Returns user's preferences and suggested filters without actual flight data.
+    Returns the 3 answers as suggestions.
     """
     if not current_user:
         return {
@@ -192,33 +197,26 @@ async def get_quick_recommendations(
             "suggestions": []
         }
     
-    preferences = recommendation_service.get_user_preferences(db, current_user.user_id)
-    
-    # Check if this route is in user's top routes
-    is_frequent_route = any(
-        r["from"] == from_city and r["to"] == to_city
-        for r in preferences.get("top_routes", [])
-    )
+    answers = recommendation_service.get_three_answers(db, current_user.user_id)
     
     suggestions = []
+    t = answers.get("preferred_time", "6-12")
+    suggestions.append(f"You prefer departures between {t}")
     
-    if is_frequent_route:
-        suggestions.append(f"This is one of your frequent routes!")
+    dims = answers.get("preferred_dimensions", [])
+    dim_labels = {"price": "price", "duration": "short flights", "comfort": "comfort"}
+    if dims:
+        suggestions.append(f"You prioritize {' & '.join(dim_labels.get(d, d) for d in dims)}")
     
-    preferred_time = preferences.get("preferred_time_range", "8-12")
-    suggestions.append(f"You usually prefer departures between {preferred_time}")
-    
-    preferred_sort = preferences.get("preferred_sort", "overall")
-    if preferred_sort == "price":
-        suggestions.append("You tend to prioritize price - we'll highlight budget options")
-    elif preferred_sort == "duration":
-        suggestions.append("You prefer shorter flights - we'll highlight quick options")
+    airline = answers.get("preferred_airline")
+    if airline:
+        suggestions.append(f"You like flying {airline}")
     
     return {
-        "has_preferences": True,
-        "is_frequent_route": is_frequent_route,
-        "preferred_time_range": preferred_time,
-        "preferred_sort": preferred_sort,
-        "user_label": preferences.get("user_label", "business"),
+        "has_preferences": answers.get("has_data", False),
+        "preferred_time": t,
+        "preferred_dimensions": dims,
+        "preferred_airline": airline,
+        "user_label": answers.get("user_label", "business"),
         "suggestions": suggestions
     }

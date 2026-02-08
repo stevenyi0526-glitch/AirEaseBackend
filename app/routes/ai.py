@@ -5,7 +5,7 @@ AI智能搜索API路由
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 
 from app.models import AISearchRequest, AISearchResponse
 from app.services.gemini_service import gemini_service
@@ -24,6 +24,23 @@ class ChatResponse(BaseModel):
     """对话响应"""
     reply: str
     parsed_query: Optional[dict] = None
+
+
+class ParseQueryRequest(BaseModel):
+    """Natural language parse request (single-shot)"""
+    query: str
+
+
+class ConversationMessage(BaseModel):
+    """A single message in the conversation"""
+    role: str  # 'user' or 'assistant'
+    content: str
+
+
+class ChatConversationRequest(BaseModel):
+    """Multi-turn conversation request"""
+    message: str
+    conversation_history: Optional[List[ConversationMessage]] = None
 
 
 @router.post(
@@ -103,6 +120,60 @@ async def ai_health():
     return {
         "status": "ok" if has_key else "no_api_key",
         "service": "gemini",
-        "model": "gemini-3-flash-preview-exp",
+        "model": "gemini-3-flash-preview",
         "api_key_configured": has_key
     }
+
+
+@router.post(
+    "/parse-query",
+    summary="Parse natural language flight search",
+    description="Single-shot parsing of a natural language query into structured search parameters"
+)
+async def parse_query(request: ParseQueryRequest):
+    """
+    Parse a natural language flight search query.
+    
+    This proxies the Gemini API call through the backend so the frontend
+    doesn't need direct access to Google's API.
+    
+    **Example inputs:**
+    - "fly to Tokyo next Friday morning"
+    - "cheapest direct flight to Bangkok"
+    - "去上海"
+    """
+    try:
+        result = await gemini_service.parse_natural_language_query(request.query)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI parsing failed: {str(e)}")
+
+
+@router.post(
+    "/chat",
+    summary="Multi-turn AI flight search conversation",
+    description="Send a message in a multi-turn conversation to progressively build flight search parameters"
+)
+async def chat_conversation(request: ChatConversationRequest):
+    """
+    Multi-turn conversational AI flight search.
+    
+    The AI assistant will ask clarifying questions and progressively
+    build up the search parameters through conversation.
+    
+    **Returns:**
+    - message: The AI's conversational response
+    - search_params: Current state of extracted search parameters
+    """
+    try:
+        history = None
+        if request.conversation_history:
+            history = [{"role": m.role, "content": m.content} for m in request.conversation_history]
+        
+        result = await gemini_service.chat_conversation(
+            message=request.message,
+            conversation_history=history
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI chat failed: {str(e)}")

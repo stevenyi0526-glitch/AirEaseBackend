@@ -10,7 +10,8 @@ from typing import Optional
 from app.database import get_db, UserDB
 from app.models import (
     UserCreate, UserLogin, UserUpdate, Token, UserResponse,
-    VerificationRequest, ResendVerificationRequest, VerificationResponse
+    VerificationRequest, ResendVerificationRequest, VerificationResponse,
+    ForgotPasswordRequest, ResetPasswordRequest, ChangePasswordRequest
 )
 from app.services.auth_service import auth_service
 from app.services.verification_service import verification_service
@@ -397,3 +398,146 @@ async def logout():
     The client should remove the token from local storage.
     """
     return {"message": "Logged out successfully"}
+
+
+@router.post(
+    "/forgot-password",
+    response_model=VerificationResponse,
+    summary="Forgot password",
+    description="Send a password reset verification code to email"
+)
+async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Initiate password reset.
+
+    - **email**: Registered email address
+
+    Sends a 6-digit verification code to the email if the account exists.
+    Always returns success to prevent email enumeration attacks.
+    """
+    user = db.query(UserDB).filter(UserDB.user_email == request.email).first()
+    
+    if user:
+        # Generate verification code
+        code = verification_service.generate_code()
+        
+        # Store as pending "password reset" — reuse the pending registration store
+        # with a special marker
+        verification_service.store_pending_registration(
+            email=request.email,
+            code=code,
+            user_data={"action": "password_reset", "user_id": user.user_id}
+        )
+        
+        # Send reset email
+        await verification_service.send_verification_email(
+            email=request.email,
+            code=code,
+            username=user.user_name,
+            subject="AirEase - Password Reset Code"
+        )
+    
+    # Always return success to prevent email enumeration
+    return VerificationResponse(
+        message="If this email is registered, a password reset code has been sent",
+        email=request.email,
+        expires_in_minutes=verification_service.CODE_EXPIRY_MINUTES
+    )
+
+
+@router.post(
+    "/reset-password",
+    summary="Reset password with verification code",
+    description="Reset password using the code received via email"
+)
+async def reset_password(request: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """
+    Reset password with verification code.
+
+    - **email**: Email address
+    - **code**: 6-digit verification code from email
+    - **new_password**: New password (minimum 6 characters)
+    """
+    # Verify the code
+    pending_data = verification_service.verify_code(
+        email=request.email,
+        submitted_code=request.code
+    )
+    
+    if not pending_data or pending_data.get("action") != "password_reset":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired verification code"
+        )
+    
+    # Find user
+    user = db.query(UserDB).filter(UserDB.user_email == request.email).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    # Update password
+    user.user_password = auth_service.hash_password(request.new_password)
+    db.commit()
+    
+    return {"message": "Password has been reset successfully. Please log in with your new password."}
+
+
+@router.post(
+    "/change-password",
+    summary="Change password",
+    description="Change password while logged in (requires current password)"
+)
+async def change_password(
+    request: ChangePasswordRequest,
+    current_user: UserDB = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """
+    Change password for the currently logged-in user.
+
+    - **current_password**: Current account password
+    - **new_password**: New password (minimum 6 characters)
+    """
+    # Verify current password
+    if not auth_service.verify_password(request.current_password, current_user.user_password):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Current password is incorrect"
+        )
+    
+    # Update password
+    current_user.user_password = auth_service.hash_password(request.new_password)
+    db.commit()
+    
+    return {"message": "Password changed successfully"}
+
+
+@router.delete(
+    "/me",
+    summary="Delete account",
+    description="Permanently delete the current user's account"
+)
+async def delete_account(
+    current_user: UserDB = Depends(require_auth),
+    db: Session = Depends(get_db)
+):
+    """
+    Permanently delete the current user's account and all associated data.
+
+    Requires valid JWT token in Authorization header.
+    This action cannot be undone.
+    """
+    try:
+        # Delete the user (cascading should handle related records)
+        db.delete(current_user)
+        db.commit()
+        return {"message": "Account deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete account: {str(e)}"
+        )

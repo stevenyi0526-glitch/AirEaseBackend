@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     smtp_port: int = 587          # TLS port (use 465 for SSL)
     smtp_user: str = ""           # Your email address
     smtp_password: str = ""       # App password (NOT your regular password!)
-    admin_email: str = "stevenyi0526@gmail.com"  # Email to receive feedback notifications
+    admin_email: str = "steven.yi@airease.ai"  # Email to receive feedback notifications
     from_email: Optional[str] = None  # Sender email (defaults to smtp_user)
     
     @property

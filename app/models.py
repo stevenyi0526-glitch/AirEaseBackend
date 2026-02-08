@@ -420,6 +420,24 @@ class VerificationResponse(BaseModel):
         populate_by_name = True
 
 
+class ForgotPasswordRequest(BaseModel):
+    """Request to initiate password reset"""
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    """Request to reset password with verification code"""
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=6)
+    new_password: str = Field(min_length=6)
+
+
+class ChangePasswordRequest(BaseModel):
+    """Request to change password (while logged in)"""
+    current_password: str
+    new_password: str = Field(min_length=6)
+
+
 class UserUpdate(BaseModel):
     """User profile update request"""
     username: Optional[str] = Field(default=None, min_length=3, max_length=50)

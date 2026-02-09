@@ -28,3 +28,11 @@ def get_airline_reviews_service():
 def get_scoring_service():
     from app.services.scoring_service import ScoringService
     return ScoringService
+
+def get_amadeus_seatmap_service():
+    from app.services.amadeus_seatmap_service import amadeus_seatmap_service
+    return amadeus_seatmap_service
+
+def get_amadeus_autocomplete_service():
+    from app.services.amadeus_autocomplete_service import amadeus_autocomplete_service
+    return amadeus_autocomplete_service

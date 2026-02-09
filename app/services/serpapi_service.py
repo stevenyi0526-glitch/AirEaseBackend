@@ -576,14 +576,25 @@ class SerpAPIFlightService:
         )
     
     def _extract_airline_code(self, flight_number: str) -> str:
-        """Extract airline code from flight number like 'BA 301'"""
+        """Extract airline code from flight number like 'BA 301' or 'B6 123'.
+        
+        IATA airline codes are 2-character alphanumeric (e.g., BA, B6, 6E, S7).
+        The code is the prefix before the numeric flight number.
+        """
         if not flight_number:
             return "XX"
         parts = flight_number.split()
         if parts:
-            code = parts[0]
-            # Return only letters from the code
-            return ''.join(c for c in code if c.isalpha())[:2].upper()
+            code = parts[0].strip()
+            # IATA codes are exactly 2 alphanumeric characters
+            # Keep the full code (letters AND digits) - e.g., "B6", "6E", "S7"
+            if len(code) == 2:
+                return code.upper()
+            elif len(code) > 2:
+                # If combined like "B6123", extract first 2 chars
+                return code[:2].upper()
+            else:
+                return code.upper()
         return "XX"
     
     def _calculate_value_score(
@@ -1094,129 +1105,6 @@ def get_airport_code(city_name: str) -> str:
 
 
 # ============================================================
-# Autocomplete Service
-# ============================================================
-
-class SerpAPIAutocompleteService:
-    """
-    SerpAPI Google Flights Autocomplete Service
-    
-    Provides location suggestions as users type, returning:
-    - Cities with their airports
-    - Regions (countries, areas)
-    - Airport details with IATA codes
-    
-    API Docs: https://serpapi.com/google-flights-autocomplete-api
-    """
-    
-    BASE_URL = "https://serpapi.com/search"
-    
-    def __init__(self):
-        self.api_key = settings.serpapi_key
-    
-    async def get_suggestions(
-        self,
-        query: str,
-        gl: str = "us",
-        hl: str = "en",
-        exclude_regions: bool = False
-    ) -> Dict[str, Any]:
-        """
-        Get location suggestions for a search query.
-        
-        Args:
-            query: Search text (e.g., "New", "Korea", "北京")
-            gl: Country code for localization (e.g., "us", "cn", "hk")
-            hl: Language code (e.g., "en", "zh-CN", "zh-TW")
-            exclude_regions: If True, exclude region-level locations (countries, areas)
-                           Only return cities with airports
-        
-        Returns:
-            Dict containing suggestions with:
-            - position: Ranking position
-            - name: Location name
-            - type: "city" or "region"
-            - description: Brief description
-            - id: Google Knowledge Graph ID
-            - airports: List of airports (for cities)
-              - name: Airport name
-              - id: IATA code
-              - city: City name
-              - distance: Distance from city center
-        
-        Example Response:
-        {
-            "suggestions": [
-                {
-                    "position": 1,
-                    "name": "Seoul, South Korea",
-                    "type": "city",
-                    "description": "Capital of South Korea",
-                    "id": "/m/0hsqf",
-                    "airports": [
-                        {"name": "Incheon International Airport", "id": "ICN", ...},
-                        {"name": "Gimpo International Airport", "id": "GMP", ...}
-                    ]
-                }
-            ]
-        }
-        """
-        if not self.api_key:
-            raise ValueError("SERPAPI_KEY not configured")
-        
-        params = {
-            "engine": "google_flights_autocomplete",
-            "q": query,
-            "gl": gl,
-            "hl": hl,
-            "api_key": self.api_key,
-        }
-        
-        if exclude_regions:
-            params["exclude_regions"] = "true"
-        
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(self.BASE_URL, params=params)
-            response.raise_for_status()
-            return response.json()
-    
-    def parse_suggestions(self, response: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """
-        Parse autocomplete response into a clean list of suggestions.
-        
-        Returns a list of suggestion objects with normalized structure.
-        """
-        suggestions = response.get("suggestions", [])
-        parsed = []
-        
-        for suggestion in suggestions:
-            parsed_item = {
-                "position": suggestion.get("position"),
-                "name": suggestion.get("name"),
-                "type": suggestion.get("type"),  # "city" or "region"
-                "description": suggestion.get("description"),
-                "id": suggestion.get("id"),  # Google Knowledge Graph ID
-            }
-            
-            # Add airports if available (cities have airports, regions don't)
-            airports = suggestion.get("airports", [])
-            if airports:
-                parsed_item["airports"] = [
-                    {
-                        "name": airport.get("name"),
-                        "code": airport.get("id"),  # IATA code
-                        "city": airport.get("city"),
-                        "cityId": airport.get("city_id"),
-                        "distance": airport.get("distance"),
-                    }
-                    for airport in airports
-                ]
-            
-            parsed.append(parsed_item)
-        
-        return parsed
-
-
 # ============================================================
 # Price Insights Service
 # ============================================================
@@ -1386,5 +1274,4 @@ class SerpAPIPriceInsightsService:
 
 # Singleton instances
 serpapi_flight_service = SerpAPIFlightService()
-serpapi_autocomplete_service = SerpAPIAutocompleteService()
 serpapi_price_insights_service = SerpAPIPriceInsightsService()

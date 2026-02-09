@@ -146,7 +146,9 @@ async def parse_query(request: ParseQueryRequest):
         result = await gemini_service.parse_natural_language_query(request.query)
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI parsing failed: {str(e)}")
+        # Instead of returning 500, use local fallback parser
+        print(f"AI parse_query falling back to local parser: {e}")
+        return gemini_service._local_parse_natural_language(request.query)
 
 
 @router.post(
@@ -176,4 +178,18 @@ async def chat_conversation(request: ChatConversationRequest):
         )
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI chat failed: {str(e)}")
+        # Return a friendly message instead of 500
+        print(f"AI chat_conversation error, returning friendly fallback: {e}")
+        return {
+            "message": "I'm sorry, the AI assistant is temporarily unavailable. Please use the search form above to find your flight — just enter your departure, destination, and date!",
+            "search_params": {
+                "departure_city": "", "departure_city_code": "",
+                "arrival_city": "", "arrival_city_code": "",
+                "date": "", "return_date": None,
+                "time_preference": "any",
+                "passengers": {"adults": 1, "children": 0, "infants": 0},
+                "cabin_class": "economy", "max_stops": None,
+                "priority": "balanced", "additional_requirements": [],
+                "is_complete": False, "missing_fields": ["ai_unavailable"],
+            }
+        }

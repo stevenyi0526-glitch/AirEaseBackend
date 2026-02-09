@@ -18,9 +18,23 @@ class GeminiService:
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
     MODEL = "gemini-3-flash-preview"
     
+    # Errors that indicate a geo-restriction or API-level block (not our fault)
+    GEO_BLOCK_KEYWORDS = [
+        "User location is not supported",
+        "FAILED_PRECONDITION",
+        "not available in your country",
+        "not supported for the API use",
+    ]
+    
     def __init__(self):
         self.api_key = settings.gemini_api_key
         self.client = httpx.AsyncClient(timeout=30.0)
+    
+    def _is_geo_blocked(self, status_code: int, response_text: str) -> bool:
+        """Check if a Gemini error is due to geo-restriction."""
+        if status_code == 400 or status_code == 403:
+            return any(kw.lower() in response_text.lower() for kw in self.GEO_BLOCK_KEYWORDS)
+        return False
     
     async def parse_flight_query(self, natural_language: str) -> Dict[str, Any]:
         """
@@ -242,6 +256,207 @@ class GeminiService:
             "suggestions": ["请输入出发城市和目的地城市"] if not (from_city and to_city) else []
         }
     
+    def _local_parse_natural_language(self, query: str) -> Dict[str, Any]:
+        """
+        Local fallback parser for parse_natural_language_query.
+        Used when Gemini is unavailable (geo-blocked, rate-limited, etc.).
+        Handles common English and Chinese flight search patterns.
+        """
+        import re
+        
+        q = query.strip()
+        q_lower = q.lower()
+        today = datetime.now()
+        
+        # --- Airport/City code mapping ---
+        CITY_CODES = {
+            # English
+            "hong kong": "HKG", "hongkong": "HKG", "hkg": "HKG",
+            "tokyo": "NRT", "narita": "NRT", "haneda": "HND", "nrt": "NRT", "hnd": "HND",
+            "osaka": "KIX", "kix": "KIX",
+            "seoul": "ICN", "incheon": "ICN", "icn": "ICN",
+            "singapore": "SIN", "sin": "SIN",
+            "bangkok": "BKK", "bkk": "BKK",
+            "taipei": "TPE", "tpe": "TPE",
+            "shanghai": "PVG", "pvg": "PVG",
+            "beijing": "PEK", "pek": "PEK",
+            "new york": "JFK", "nyc": "JFK", "jfk": "JFK",
+            "los angeles": "LAX", "la": "LAX", "lax": "LAX",
+            "san francisco": "SFO", "sf": "SFO", "sfo": "SFO",
+            "london": "LHR", "lhr": "LHR",
+            "paris": "CDG", "cdg": "CDG",
+            "dubai": "DXB", "dxb": "DXB",
+            "sydney": "SYD", "syd": "SYD",
+            "melbourne": "MEL", "mel": "MEL",
+            "kuala lumpur": "KUL", "kl": "KUL", "kul": "KUL",
+            "mumbai": "BOM", "bom": "BOM",
+            "delhi": "DEL", "del": "DEL",
+            "frankfurt": "FRA", "fra": "FRA",
+            "amsterdam": "AMS", "ams": "AMS",
+            "istanbul": "IST", "ist": "IST",
+            "toronto": "YYZ", "yyz": "YYZ",
+            "vancouver": "YVR", "yvr": "YVR",
+            "madrid": "MAD", "mad": "MAD",
+            "barcelona": "BCN", "bcn": "BCN",
+            "rome": "FCO", "fco": "FCO",
+            # Chinese
+            "香港": "HKG", "东京": "NRT", "大阪": "KIX", "首尔": "ICN",
+            "新加坡": "SIN", "曼谷": "BKK", "台北": "TPE",
+            "上海": "PVG", "北京": "PEK", "广州": "CAN", "深圳": "SZX",
+            "成都": "CTU", "杭州": "HGH", "武汉": "WUH", "西安": "XIY",
+            "南京": "NKG", "重庆": "CKG", "纽约": "JFK", "伦敦": "LHR",
+            "巴黎": "CDG", "悉尼": "SYD", "迪拜": "DXB", "吉隆坡": "KUL",
+        }
+        
+        # Reverse: code → city name
+        CODE_TO_CITY = {}
+        for city, code in CITY_CODES.items():
+            if code not in CODE_TO_CITY and len(city) > 2:
+                CODE_TO_CITY[code] = city.title()
+        
+        destination_city = ""
+        destination_code = ""
+        departure_city = ""
+        departure_code = ""
+        
+        # --- Extract destination: "to <city>" / "fly to <city>" / "去<city>" ---
+        # Sort by length descending so "new york" matches before "new"
+        sorted_cities = sorted(CITY_CODES.keys(), key=len, reverse=True)
+        
+        # Pattern: "to <city>"
+        for city in sorted_cities:
+            pattern_to = rf'\bto\s+{re.escape(city)}\b'
+            if re.search(pattern_to, q_lower):
+                destination_code = CITY_CODES[city]
+                destination_city = CODE_TO_CITY.get(destination_code, city.title())
+                break
+        
+        # Chinese: "去<city>" / "飞<city>" / "到<city>"
+        if not destination_code:
+            for city in sorted_cities:
+                if any(f"{prefix}{city}" in q for prefix in ["去", "飞", "到"]):
+                    destination_code = CITY_CODES[city]
+                    destination_city = CODE_TO_CITY.get(destination_code, city.title())
+                    break
+        
+        # Fallback: just find any city mentioned (last one = likely destination)
+        if not destination_code:
+            found = []
+            for city in sorted_cities:
+                if city in q_lower and len(city) > 2:  # skip 2-letter codes for fuzzy
+                    found.append((city, CITY_CODES[city]))
+            if found:
+                destination_code = found[-1][1]
+                destination_city = CODE_TO_CITY.get(destination_code, found[-1][0].title())
+                if len(found) > 1:
+                    departure_code = found[0][1]
+                    departure_city = CODE_TO_CITY.get(departure_code, found[0][0].title())
+        
+        # --- Extract departure: "from <city>" / "从<city>" ---
+        if not departure_code:
+            for city in sorted_cities:
+                pattern_from = rf'\bfrom\s+{re.escape(city)}\b'
+                if re.search(pattern_from, q_lower):
+                    departure_code = CITY_CODES[city]
+                    departure_city = CODE_TO_CITY.get(departure_code, city.title())
+                    break
+            if not departure_code:
+                for city in sorted_cities:
+                    if f"从{city}" in q:
+                        departure_code = CITY_CODES[city]
+                        departure_city = CODE_TO_CITY.get(departure_code, city.title())
+                        break
+        
+        # --- Date parsing ---
+        date_str = ""
+        day_names = {"monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+                     "friday": 4, "saturday": 5, "sunday": 6}
+        
+        if "today" in q_lower or "今天" in q:
+            date_str = today.strftime("%Y-%m-%d")
+        elif "tomorrow" in q_lower or "明天" in q:
+            date_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        elif "后天" in q:
+            date_str = (today + timedelta(days=2)).strftime("%Y-%m-%d")
+        elif "this weekend" in q_lower or "这周末" in q:
+            days_to_sat = (5 - today.weekday()) % 7
+            if days_to_sat == 0:
+                days_to_sat = 7
+            date_str = (today + timedelta(days=days_to_sat)).strftime("%Y-%m-%d")
+        else:
+            # "next Friday" pattern
+            next_match = re.search(r'next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)', q_lower)
+            if next_match:
+                target_day = day_names[next_match.group(1)]
+                days_ahead = (target_day - today.weekday()) % 7
+                if days_ahead == 0:
+                    days_ahead = 7
+                date_str = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+            else:
+                # "下周X" pattern
+                cn_day_match = re.search(r'下周([一二三四五六日天])', q)
+                if cn_day_match:
+                    cn_day_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+                    target_day = cn_day_map.get(cn_day_match.group(1), 0)
+                    days_ahead = (target_day - today.weekday()) % 7
+                    if days_ahead <= 0:
+                        days_ahead += 7
+                    date_str = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+        
+        # --- Cabin class ---
+        cabin_class = "economy"
+        if any(w in q_lower for w in ["business", "商务", "公务"]):
+            cabin_class = "business"
+        elif any(w in q_lower for w in ["first class", "first", "头等"]):
+            cabin_class = "first"
+        elif any(w in q_lower for w in ["premium", "premium economy", "超级经济"]):
+            cabin_class = "premium_economy"
+        
+        # --- Sort preference ---
+        sort_by = "score"
+        if any(w in q_lower for w in ["cheap", "cheapest", "budget", "便宜", "最便宜"]):
+            sort_by = "price"
+        elif any(w in q_lower for w in ["fast", "fastest", "quickest", "最快", "快"]):
+            sort_by = "duration"
+        elif any(w in q_lower for w in ["comfort", "comfortable", "舒适", "舒服"]):
+            sort_by = "comfort"
+        
+        # --- Stops ---
+        stops = "any"
+        if any(w in q_lower for w in ["direct", "nonstop", "non-stop", "直飞"]):
+            stops = "0"
+        elif "1 stop" in q_lower or "one stop" in q_lower:
+            stops = "1"
+        
+        # --- Time preference ---
+        time_pref = "any"
+        if any(w in q_lower for w in ["morning", "早上", "早班"]):
+            time_pref = "morning"
+        elif any(w in q_lower for w in ["afternoon", "下午"]):
+            time_pref = "afternoon"
+        elif any(w in q_lower for w in ["evening", "晚上", "傍晚"]):
+            time_pref = "evening"
+        elif any(w in q_lower for w in ["night", "red-eye", "red eye", "凌晨"]):
+            time_pref = "night"
+        
+        return {
+            "has_destination": bool(destination_code),
+            "destination_city": destination_city,
+            "destination_code": destination_code,
+            "departure_city": departure_city,
+            "departure_code": departure_code,
+            "date": date_str,
+            "time_preference": time_pref,
+            "passengers": 1,
+            "cabin_class": cabin_class,
+            "sort_by": sort_by,
+            "stops": stops,
+            "aircraft_type": "any",
+            "alliance": "any",
+            "max_price": None,
+            "preferred_airlines": [],
+        }
+
     async def parse_natural_language_query(self, query: str) -> Dict[str, Any]:
         """
         Parse a natural language flight search query (single-shot).
@@ -398,7 +613,11 @@ Respond with JSON only, no explanation:"""
                 )
 
             if response.status_code != 200:
-                print(f"Gemini API error: {response.status_code} - {response.text}")
+                error_text = response.text
+                print(f"Gemini API error: {response.status_code} - {error_text}")
+                if self._is_geo_blocked(response.status_code, error_text):
+                    print("⚠️  Gemini geo-blocked — using local NLP fallback for parse_natural_language_query")
+                    return self._local_parse_natural_language(query)
                 raise Exception(f"Gemini API error: {response.status_code}")
 
             data = response.json()
@@ -438,6 +657,9 @@ Respond with JSON only, no explanation:"""
 
         except Exception as e:
             print(f"Gemini parse_natural_language_query error: {e}")
+            # If any Gemini error, try local fallback instead of crashing
+            if "geo" in str(e).lower() or "location" in str(e).lower() or "FAILED_PRECONDITION" in str(e):
+                return self._local_parse_natural_language(query)
             raise
 
     async def chat_conversation(
@@ -582,6 +804,21 @@ You MUST respond with a valid JSON object in this exact format:
             if response.status_code != 200:
                 error_text = response.text
                 print(f"Gemini API error: {response.status_code} - {error_text}")
+                if self._is_geo_blocked(response.status_code, error_text):
+                    print("⚠️  Gemini geo-blocked — returning friendly error for chat")
+                    return {
+                        "message": "I'm sorry, the AI service is temporarily unavailable. Please try using the manual search form to find your flight — it works just as well!",
+                        "search_params": {
+                            "departure_city": "", "departure_city_code": "",
+                            "arrival_city": "", "arrival_city_code": "",
+                            "date": "", "return_date": None,
+                            "time_preference": "any",
+                            "passengers": {"adults": 1, "children": 0, "infants": 0},
+                            "cabin_class": "economy", "max_stops": None,
+                            "priority": "balanced", "additional_requirements": [],
+                            "is_complete": False, "missing_fields": ["ai_unavailable"],
+                        }
+                    }
                 raise Exception(f"Gemini API error: {response.status_code}")
 
             data = response.json()

@@ -750,39 +750,46 @@ class ReportCategoryInfo(BaseModel):
 
 
 # ============================================================
-# Autocomplete Models (地点自动补全)
+# Autocomplete Models (地点自动补全) - Amadeus Airport & City Search
 # ============================================================
 
-class AirportSuggestion(BaseModel):
-    """机场建议"""
-    name: str
-    code: str  # IATA code
-    city: Optional[str] = None
-    city_id: Optional[str] = Field(default=None, alias="cityId")
-    distance: Optional[str] = None  # Distance from city center
-    
-    class Config:
-        populate_by_name = True
+class GeoCode(BaseModel):
+    """地理坐标"""
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 
 class LocationSuggestion(BaseModel):
-    """位置建议（城市、地区或机场）"""
-    position: int
-    name: str
-    type: Optional[str] = None  # "city", "region", or None for direct airport matches
-    description: Optional[str] = None
-    id: Optional[str] = None  # Google Knowledge Graph ID
-    airports: Optional[List[AirportSuggestion]] = None
+    """
+    位置建议 - Amadeus Airport & City Search result.
     
+    Each result is either an AIRPORT or a CITY with IATA code,
+    name, country, geo coordinates, and traveler popularity score.
+    """
+    id: Optional[str] = None  # Amadeus location ID (e.g., "AJFK", "CNYC")
+    iata_code: str = Field(alias="iataCode")  # IATA code (e.g., "JFK", "MUC")
+    name: str  # Short name (e.g., "JOHN F KENNEDY INTL")
+    detailed_name: Optional[str] = Field(default=None, alias="detailedName")  # e.g., "NEW YORK/US: JOHN F KENNEDY INTL"
+    sub_type: Optional[str] = Field(default=None, alias="subType")  # "AIRPORT" or "CITY"
+    city_name: Optional[str] = Field(default=None, alias="cityName")
+    city_code: Optional[str] = Field(default=None, alias="cityCode")
+    country_name: Optional[str] = Field(default=None, alias="countryName")
+    country_code: Optional[str] = Field(default=None, alias="countryCode")
+    region_code: Optional[str] = Field(default=None, alias="regionCode")
+    state_code: Optional[str] = Field(default=None, alias="stateCode")
+    time_zone_offset: Optional[str] = Field(default=None, alias="timeZoneOffset")
+    geo_code: Optional[GeoCode] = Field(default=None, alias="geoCode")
+    score: Optional[int] = None  # Traveler popularity score
+
     class Config:
         populate_by_name = True
 
 
 class AutocompleteResponse(BaseModel):
-    """自动补全响应"""
+    """自动补全响应 - Amadeus Airport & City Search"""
     query: str
     suggestions: List[LocationSuggestion]
-    
+
     class Config:
         populate_by_name = True
 

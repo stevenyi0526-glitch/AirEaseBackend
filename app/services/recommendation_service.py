@@ -156,16 +156,29 @@ class RecommendationService:
     ) -> List[Dict[str, Any]]:
         """
         Score and rank flights using the 3 simple preference answers.
+        
+        IMPORTANT RULES:
+        1. Overall score is ALWAYS a major factor (max +30 pts)
+        2. Only direct flights (stops == 0) are recommended by default.
+           Falls back to all flights only if fewer than 3 directs available.
+        
         Returns top 3 flights.
         """
         if not flights:
             return []
 
+        # ---- Default to DIRECT FLIGHTS ONLY ----
+        direct_flights = [
+            f for f in flights
+            if f.get("flight", f).get("stops", 0) == 0
+        ]
+        # Use directs if we have at least 3, otherwise fall back to all
+        pool = direct_flights if len(direct_flights) >= 3 else flights
+
         # Extract the 3 answers (already computed in preferences)
         preferred_time = preferences.get("preferred_time", "6-12")
         preferred_dims = preferences.get("preferred_dimensions", ["comfort"])
         preferred_airline = preferences.get("preferred_airline")
-        user_label = preferences.get("user_label", "business")
 
         # Parse time range
         try:
@@ -175,7 +188,7 @@ class RecommendationService:
             time_start, time_end = 6, 12
 
         scored = []
-        for flight in flights:
+        for flight in pool:
             pts = 0.0
             reasons: List[str] = []
 
@@ -183,20 +196,18 @@ class RecommendationService:
             sd = flight.get("score", {})
             dims = sd.get("dimensions", {})
 
-            # --- Q1: Time match (max +25) ---
+            # --- Q1: Time match (max +15) ---
             dep_time = fd.get("departureTime") or fd.get("departure_time")
             if dep_time:
                 hour = self._extract_hour(dep_time)
                 if time_start <= hour < time_end:
-                    pts += 25
+                    pts += 15
                     reasons.append(f"Departs {time_start}:00–{time_end}:00 ✓")
 
-            # --- Q2: Dimension match (max +40 total) ---
+            # --- Q2: Dimension match (max +25 total) ---
             for i, dim in enumerate(preferred_dims):
-                weight = 25 if i == 0 else 15  # primary dim gets more weight
+                weight = 15 if i == 0 else 10  # primary dim gets more weight
                 if dim == "price":
-                    # Lower price = higher points; normalize against flight set
-                    price = fd.get("price", 9999)
                     # Value dimension score from our scoring (0-10)
                     value_score = dims.get("value", 5)
                     pts += (value_score / 10) * weight
@@ -213,18 +224,28 @@ class RecommendationService:
                     if comfort >= 7:
                         reasons.append("High comfort" if i == 0 else "Comfortable")
 
-            # --- Q3: Airline match (max +20) ---
+            # --- Q3: Airline match (max +15) ---
             if preferred_airline:
                 airline_name = fd.get("airline", "")
                 airline_code = fd.get("airlineCode") or fd.get("airline_code", "")
                 if (preferred_airline.lower() in airline_name.lower()
                         or preferred_airline.upper() == airline_code.upper()):
-                    pts += 20
+                    pts += 15
                     reasons.append(f"Your airline: {airline_name}")
 
-            # --- Baseline: overall score bonus (max +15) ---
+            # --- OVERALL SCORE: always the biggest factor (max +30) ---
             overall = sd.get("overallScore", 70)
-            pts += (overall / 100) * 15
+            pts += (overall / 100) * 30
+            if overall >= 85:
+                reasons.append(f"Excellent score: {overall}")
+            elif overall >= 75:
+                reasons.append(f"Great score: {overall}")
+
+            # --- Direct flight bonus (max +15) ---
+            stops = fd.get("stops", 0)
+            if stops == 0:
+                pts += 15
+                reasons.append("Direct flight ✓")
 
             scored.append({
                 **flight,

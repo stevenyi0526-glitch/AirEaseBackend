@@ -62,6 +62,10 @@ async def redirect_to_booking(
     prefer_returning: bool = Query(
         False,
         description="For round trips with separate tickets, prefer returning flight booking"
+    ),
+    prefer_expedia: bool = Query(
+        False,
+        description="If True, prefer Expedia as the booking provider (for mixed-airline bookings). Falls back to first available option if Expedia is not listed."
     )
 ):
     """
@@ -120,6 +124,21 @@ async def redirect_to_booking(
         booking_options = serpapi_response.get("booking_options", [])
         
         if not booking_options:
+            # Check if this is a Chinese domestic route
+            from app.services.booking_redirect_service import _get_country_code_for_airport
+            dep_country = _get_country_code_for_airport(departure_id) if departure_id else ""
+            arr_country = _get_country_code_for_airport(arrival_id) if arrival_id else ""
+            is_chinese_domestic = dep_country == "cn" and arr_country == "cn"
+            
+            if is_chinese_domestic:
+                return HTMLResponse(
+                    content=booking_redirect_service.generate_error_html(
+                        error_message="Google does not support Chinese domestic bookings",
+                        details="Please book directly on the airline's website or through a Chinese travel platform such as Ctrip (携程), Qunar (去哪儿), or Fliggy (飞猪)."
+                    ),
+                    status_code=200
+                )
+            
             return HTMLResponse(
                 content=booking_redirect_service.generate_error_html(
                     error_message="No booking options available",
@@ -131,7 +150,8 @@ async def redirect_to_booking(
         # Step 3: Find matching booking option
         selected_option = booking_redirect_service.find_booking_option(
             booking_options=booking_options,
-            airline_name=airline_name
+            airline_name=airline_name,
+            prefer_expedia=prefer_expedia
         )
         
         if not selected_option:

@@ -144,15 +144,17 @@ async def generate_recommendations(
     Returns top 3 recommended flights.
     """
     if not current_user:
-        # Non-authenticated: top 3 by overall score
+        # Non-authenticated: filter to direct flights first, then sort by overall score
+        direct_flights = [f for f in flights if f.get("flight", f).get("stops", 0) == 0]
+        pool = direct_flights if len(direct_flights) >= 3 else flights
         sorted_flights = sorted(
-            flights,
+            pool,
             key=lambda x: x.get("score", {}).get("overallScore", 0),
             reverse=True
         )
         return {
             "recommendations": sorted_flights[:3],
-            "explanation": "Top rated flights based on our scoring algorithm.",
+            "explanation": "Top rated direct flights based on our scoring algorithm.",
             "preferences_used": {}
         }
     

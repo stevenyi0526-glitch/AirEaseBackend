@@ -33,13 +33,13 @@ class FlightRouteCoordinates(BaseModel):
 
 
 def get_db_connection():
-    """Get PostgreSQL database connection"""
+    """Get PostgreSQL database connection from shared config"""
     return psycopg2.connect(
-        dbname='airease',
-        user='steven_admin',
-        password='diuneilomoon79',
-        host='localhost',
-        port='5432'
+        dbname=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
+        host=settings.postgres_host,
+        port=str(settings.postgres_port)
     )
 
 

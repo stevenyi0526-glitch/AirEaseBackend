@@ -33,8 +33,8 @@ class Settings(BaseSettings):
     # PostgreSQL Database
     postgres_host: str = "localhost"
     postgres_port: int = 5432
-    postgres_user: str = "steven_admin"
-    postgres_password: str = "diuneilomoon79"
+    postgres_user: str = ""
+    postgres_password: str = ""
     postgres_db: str = "airease"
     
     @property

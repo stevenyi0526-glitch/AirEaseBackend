@@ -22,6 +22,9 @@ from app.routes.booking import router as booking_router
 from app.routes.autocomplete import router as autocomplete_router
 from app.routes.price_insights import router as price_insights_router
 from app.routes.user_preferences import router as user_preferences_router
+from app.routes.exchange_rates import router as exchange_rates_router
+# PAUSED: SeatMap disabled until Amadeus production access (test env = cached/mock data)
+# from app.routes.seatmap import router as seatmap_router
 from app.database import init_db
 
 
@@ -31,9 +34,11 @@ async def lifespan(app: FastAPI):
     # Startup
     print("🛫 AirEase Backend starting...")
     print(f"   Debug mode: {settings.debug}")
-    print(f"   SerpAPI (Flights/Autocomplete/Price): {'✓ configured' if settings.serpapi_key else '✗ not configured'}")
+    print(f"   SerpAPI (Flights/Price): {'✓ configured' if settings.serpapi_key else '✗ not configured'}")
+    print(f"   Amadeus (Autocomplete): {'✓ configured' if settings.amadeus_api_key else '✗ not configured'}")
     print(f"   Gemini API: {'✓ configured' if settings.gemini_api_key else '✗ not configured'}")
     print(f"   Amadeus API: {'✓ configured' if settings.amadeus_api_key else '✗ not configured'}")
+    print(f"   Amadeus SeatMap: ⏸ PAUSED (test env = cached data, re-enable with production key)")
     print(f"   Google Places API: {'✓ configured' if settings.google_places_api_key else '✗ not configured (using local fallback)'}")
     print(f"   JWT Auth: ✓ configured")
     print(f"   Email Notifications: {'✓ configured → ' + settings.admin_email if settings.smtp_host and settings.admin_email else '✗ not configured'}")
@@ -126,6 +131,9 @@ app.include_router(ai_router)
 app.include_router(recommendations_router)
 app.include_router(user_preferences_router)
 app.include_router(reports_router)
+app.include_router(exchange_rates_router)
+# PAUSED: SeatMap disabled until Amadeus production access
+# app.include_router(seatmap_router)
 
 
 # Root endpoint

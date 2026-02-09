@@ -160,26 +160,48 @@ class BookingRedirectService:
     def find_booking_option(
         self,
         booking_options: list,
-        airline_name: Optional[str] = None
+        airline_name: Optional[str] = None,
+        prefer_expedia: bool = False
     ) -> Optional[Dict[str, Any]]:
         """
         Find the best matching booking option.
         
-        Priority:
-        1. Official airline website (airline=True) matching the airline_name
-        2. Any official airline website (airline=True)
-        3. Third-party seller matching the airline_name
-        4. Fall back to first available option
+        Priority when prefer_expedia=False (same airline):
+          1. Official airline website matching the airline_name
+          2. Any official airline website (airline=True)
+          3. Expedia if available
+          4. Fall back to first available option
+        
+        Priority when prefer_expedia=True (different airlines / aggregator):
+          1. Expedia if available
+          2. Fall back to first available option
         
         Args:
             booking_options: List of booking options from SerpAPI
             airline_name: Optional airline name to match (e.g., "ANA", "Delta")
+            prefer_expedia: If True, skip airline matching and prefer Expedia
         
         Returns:
             The selected booking option, or None if not found
         """
         if not booking_options:
             return None
+        
+        # Helper: check if option is Expedia
+        def _is_expedia(option: Dict[str, Any]) -> bool:
+            together = option.get("together", {})
+            book_with = together.get("book_with", "").lower()
+            return "expedia" in book_with
+        
+        if prefer_expedia:
+            # AGGREGATOR MODE: prefer Expedia, else first option
+            for option in booking_options:
+                if _is_expedia(option):
+                    return option
+            # No Expedia found → fall back to first option
+            return booking_options[0] if booking_options else None
+        
+        # AIRLINE MODE: try official airline first, then Expedia, then first
         
         # Get name variations for matching
         search_names = _normalize_airline_name(airline_name) if airline_name else []
@@ -206,14 +228,10 @@ class BookingRedirectService:
             if together.get("airline", False):
                 return option
         
-        # Third priority: Third-party seller matching airline name
-        if search_names:
-            for option in booking_options:
-                together = option.get("together", {})
-                book_with = together.get("book_with", "")
-                
-                if _matches_airline(book_with):
-                    return option
+        # Third priority: Expedia
+        for option in booking_options:
+            if _is_expedia(option):
+                return option
         
         # Fall back to first option
         return booking_options[0] if booking_options else None

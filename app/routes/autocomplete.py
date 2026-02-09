@@ -2,167 +2,249 @@
 AirEase Backend - Autocomplete API Routes
 位置自动补全API
 
-Uses SerpAPI Google Flights Autocomplete for location suggestions.
-https://serpapi.com/google-flights-autocomplete-api
+Uses Amadeus Airport & City Search API for location suggestions.
+Falls back to local PostgreSQL airports database when Amadeus returns no results
+(e.g., for regions not covered by the Amadeus test environment).
 """
 
 from fastapi import APIRouter, HTTPException, Query
-from typing import List, Optional
+from typing import Optional, List
+import logging
+import psycopg2
 
-from app.models import (
-    AutocompleteResponse, LocationSuggestion, AirportSuggestion
-)
-from app.services.serpapi_service import serpapi_autocomplete_service
+from app.models import AutocompleteResponse, LocationSuggestion, GeoCode
+from app.services.amadeus_autocomplete_service import amadeus_autocomplete_service
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/v1/autocomplete", tags=["Autocomplete"])
+
+
+def _get_db_connection():
+    """Get PostgreSQL connection for local airport fallback."""
+    return psycopg2.connect(
+        dbname=settings.postgres_db,
+        user=settings.postgres_user,
+        password=settings.postgres_password,
+        host=settings.postgres_host,
+        port=str(settings.postgres_port),
+    )
+
+
+def _local_airport_search(keyword: str, limit: int = 10) -> List[LocationSuggestion]:
+    """
+    Search the local airports table as a fallback.
+    Returns LocationSuggestion objects matching the Amadeus response format.
+    """
+    try:
+        conn = _get_db_connection()
+        cursor = conn.cursor()
+
+        search_term = f"%{keyword.upper()}%"
+
+        cursor.execute(
+            """
+            SELECT iata_code, name, municipality, iso_country,
+                   latitude_deg, longitude_deg
+            FROM airports
+            WHERE (
+                UPPER(iata_code) LIKE %s OR
+                UPPER(name) LIKE %s OR
+                UPPER(municipality) LIKE %s
+            )
+            AND type IN ('large_airport', 'medium_airport')
+            AND iata_code IS NOT NULL
+            AND iata_code != ''
+            ORDER BY
+                CASE
+                    WHEN UPPER(iata_code) = %s THEN 0
+                    WHEN UPPER(iata_code) LIKE %s THEN 1
+                    WHEN type = 'large_airport' THEN 2
+                    ELSE 3
+                END
+            LIMIT %s
+            """,
+            (search_term, search_term, search_term, keyword.upper(), search_term, limit),
+        )
+
+        results = []
+        for row in cursor.fetchall():
+            iata_code, name, municipality, country, lat, lng = row
+            geo = None
+            if lat is not None and lng is not None:
+                geo = GeoCode(latitude=float(lat), longitude=float(lng))
+
+            city_name = municipality or ""
+            display_name = name or iata_code
+            detailed = f"{city_name}/{country}: {display_name}" if city_name else f"{country}: {display_name}"
+
+            results.append(
+                LocationSuggestion(
+                    id=f"A{iata_code}",
+                    iataCode=iata_code,
+                    name=display_name.upper(),
+                    detailedName=detailed.upper(),
+                    subType="AIRPORT",
+                    cityName=city_name.upper(),
+                    cityCode=iata_code,
+                    countryName=country.upper() if country else None,
+                    countryCode=country.upper() if country else None,
+                    geoCode=geo,
+                    score=None,
+                )
+            )
+
+        cursor.close()
+        conn.close()
+        return results
+
+    except Exception as e:
+        logger.warning(f"Local airport fallback search failed: {e}")
+        return []
 
 
 @router.get(
     "/locations",
     response_model=AutocompleteResponse,
-    summary="获取位置建议",
-    description="根据搜索词获取城市和机场建议，用于搜索框自动补全。"
+    summary="搜索机场和城市",
+    description="根据关键词搜索机场和城市建议。优先使用 Amadeus API，无结果时回退到本地数据库。",
 )
 async def get_location_suggestions(
-    q: str = Query(..., min_length=1, max_length=100, description="搜索词 (如: 'New York', '东京', 'HKG')"),
-    gl: str = Query("us", description="国家代码 (如: 'us', 'cn', 'hk')"),
-    hl: str = Query("en", description="语言代码 (如: 'en', 'zh-CN', 'zh-TW')"),
-    exclude_regions: bool = Query(False, alias="excludeRegions", description="是否排除地区级别的结果（只返回有机场的城市）"),
+    q: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="搜索关键词 (如: 'New York', 'MUC', 'HKG')",
+    ),
+    sub_type: str = Query(
+        "AIRPORT,CITY",
+        alias="subType",
+        description="搜索类型: AIRPORT, CITY, 或 AIRPORT,CITY",
+    ),
+    country_code: Optional[str] = Query(
+        None,
+        alias="countryCode",
+        description="ISO 3166-1 alpha-2 国家代码过滤 (如: 'US', 'DE', 'GB')",
+    ),
+    page_limit: int = Query(
+        10,
+        alias="limit",
+        ge=1,
+        le=20,
+        description="最大返回数量 (默认 10)",
+    ),
 ):
     """
-    获取位置建议 - Get Location Suggestions
-    
-    使用 SerpAPI Google Flights Autocomplete API 获取位置建议。
-    
-    功能特点:
-    - 支持城市名称搜索 (如: "New York", "东京", "香港")
-    - 支持机场代码搜索 (如: "JFK", "NRT", "HKG")
-    - 返回城市和地区建议
-    - 城市建议包含关联机场列表
-    - 支持多语言 (英语、中文等)
-    
-    参数:
-    - **q**: 搜索词 (必填)
-    - **gl**: 国家代码，用于本地化结果 (默认: "us")
-    - **hl**: 语言代码 (默认: "en")
-    - **excludeRegions**: 是否排除地区级别结果 (默认: false)
-      - false: 返回城市和地区
-      - true: 只返回有机场的城市
-    
-    返回示例:
-    ```json
-    {
-        "query": "Korea",
-        "suggestions": [
-            {
-                "position": 1,
-                "name": "Seoul, South Korea",
-                "type": "city",
-                "description": "Capital of South Korea",
-                "id": "/m/0hsqf",
-                "airports": [
-                    {"name": "Incheon International Airport", "code": "ICN", "city": "Seoul", "distance": "31 mi"},
-                    {"name": "Gimpo International Airport", "code": "GMP", "city": "Seoul", "distance": "11 mi"}
-                ]
-            },
-            {
-                "position": 2,
-                "name": "South Korea",
-                "type": "region",
-                "description": "Country in East Asia"
-            }
-        ]
-    }
-    ```
+    搜索机场和城市 - Search Airports & Cities
+
+    优先使用 Amadeus Airport & City Search API。
+    当 Amadeus 无结果时（例如测试环境不包含该地区），自动回退到本地数据库搜索。
     """
-    # Check if SerpAPI is configured
-    if not settings.serpapi_key:
-        raise HTTPException(
-            status_code=503,
-            detail="Autocomplete service is not configured. SERPAPI_KEY is missing."
-        )
-    
+    # Check if Amadeus API is configured
+    if not settings.amadeus_api_key or not settings.amadeus_api_secret:
+        # No Amadeus — go straight to local fallback
+        suggestions = _local_airport_search(q, page_limit)
+        return AutocompleteResponse(query=q, suggestions=suggestions)
+
     try:
-        # Call SerpAPI Autocomplete
-        raw_response = await serpapi_autocomplete_service.get_suggestions(
-            query=q,
-            gl=gl,
-            hl=hl,
-            exclude_regions=exclude_regions
+        # 1. Try Amadeus Airport & City Search
+        raw_response = await amadeus_autocomplete_service.search_locations(
+            keyword=q,
+            sub_type=sub_type,
+            country_code=country_code,
+            page_limit=page_limit,
         )
-        
-        # Check for API errors
-        if "error" in raw_response:
-            raise HTTPException(
-                status_code=502,
-                detail=f"SerpAPI error: {raw_response['error']}"
-            )
-        
-        # Parse suggestions
-        parsed_suggestions = serpapi_autocomplete_service.parse_suggestions(raw_response)
-        
-        # Convert to Pydantic models
+
+        # Parse Amadeus results
+        parsed = amadeus_autocomplete_service.parse_locations(raw_response)
+
         suggestions = []
-        for item in parsed_suggestions:
-            airports = None
-            if item.get("airports"):
-                airports = [
-                    AirportSuggestion(
-                        name=a["name"],
-                        code=a["code"],
-                        city=a.get("city"),
-                        cityId=a.get("cityId"),
-                        distance=a.get("distance")
-                    )
-                    for a in item["airports"]
-                ]
-            
-            suggestions.append(LocationSuggestion(
-                position=item["position"],
-                name=item["name"],
-                type=item["type"],
-                description=item.get("description"),
-                id=item.get("id"),
-                airports=airports
-            ))
-        
-        return AutocompleteResponse(
-            query=q,
-            suggestions=suggestions
-        )
-        
+        for item in parsed:
+            geo = None
+            if item.get("geoCode") and item["geoCode"].get("latitude") is not None:
+                geo = GeoCode(
+                    latitude=item["geoCode"]["latitude"],
+                    longitude=item["geoCode"]["longitude"],
+                )
+
+            suggestions.append(
+                LocationSuggestion(
+                    id=item.get("id"),
+                    iataCode=item["iataCode"],
+                    name=item["name"],
+                    detailedName=item.get("detailedName"),
+                    subType=item.get("subType"),
+                    cityName=item.get("cityName"),
+                    cityCode=item.get("cityCode"),
+                    countryName=item.get("countryName"),
+                    countryCode=item.get("countryCode"),
+                    regionCode=item.get("regionCode"),
+                    stateCode=item.get("stateCode"),
+                    timeZoneOffset=item.get("timeZoneOffset"),
+                    geoCode=geo,
+                    score=item.get("score"),
+                )
+            )
+
+        # 2. If Amadeus returned results, return them
+        if suggestions:
+            return AutocompleteResponse(query=q, suggestions=suggestions)
+
+        # 3. Amadeus returned empty — fall back to local DB
+        logger.info(f"Amadeus returned no results for '{q}', falling back to local DB")
+        suggestions = _local_airport_search(q, page_limit)
+        return AutocompleteResponse(query=q, suggestions=suggestions)
+
     except HTTPException:
         raise
     except Exception as e:
+        # If Amadeus call itself fails, try local fallback
+        logger.warning(f"Amadeus autocomplete failed for '{q}': {e}, using local fallback")
+        suggestions = _local_airport_search(q, page_limit)
+        if suggestions:
+            return AutocompleteResponse(query=q, suggestions=suggestions)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to fetch location suggestions: {str(e)}"
+            detail=f"Failed to fetch location suggestions: {str(e)}",
         )
 
 
 @router.get(
     "/airports",
     response_model=AutocompleteResponse,
-    summary="获取机场建议",
-    description="只返回有机场的城市建议，适用于航班搜索。"
+    summary="搜索机场",
+    description="只返回机场建议，适用于航班搜索。",
 )
 async def get_airport_suggestions(
-    q: str = Query(..., min_length=1, max_length=100, description="搜索词"),
-    gl: str = Query("us", description="国家代码"),
-    hl: str = Query("en", description="语言代码"),
+    q: str = Query(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="搜索关键词",
+    ),
+    country_code: Optional[str] = Query(
+        None,
+        alias="countryCode",
+        description="国家代码过滤",
+    ),
+    page_limit: int = Query(
+        10,
+        alias="limit",
+        ge=1,
+        le=20,
+        description="最大返回数量",
+    ),
 ):
     """
-    获取机场建议 - Get Airport Suggestions
-    
-    专门用于航班搜索的机场建议接口。
-    只返回有机场的城市，不包含地区级别的结果。
-    
-    这是 /locations 接口的简化版本，等同于设置 excludeRegions=true。
+    搜索机场 - Search Airports Only
+
+    只搜索机场（不含城市），适用于航班搜索输入框。
+    等同于 /locations?subType=AIRPORT
     """
     return await get_location_suggestions(
         q=q,
-        gl=gl,
-        hl=hl,
-        exclude_regions=True
+        sub_type="AIRPORT",
+        country_code=country_code,
+        page_limit=page_limit,
     )

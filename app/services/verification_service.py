@@ -5,6 +5,10 @@ Handles email verification codes for user registration
 
 import random
 import string
+import logging
+import traceback
+import asyncio
+import sys
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Tuple
 import smtplib
@@ -12,6 +16,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 class VerificationService:
@@ -124,7 +130,8 @@ class VerificationService:
         self,
         email: str,
         code: str,
-        username: str
+        username: str,
+        subject: str = None
     ) -> bool:
         """
         Send verification code email to user.
@@ -133,18 +140,20 @@ class VerificationService:
             email: Recipient email address
             code: Verification code
             username: User's display name
+            subject: Optional custom email subject
         
         Returns:
             True if email sent successfully, False otherwise
         """
         if not self.is_configured():
-            print("⚠️ Email service not configured. Verification code:", code)
+            logger.warning(f"⚠️ Email service not configured. Verification code: {code}")
             # In development, return True so registration can proceed
             return True
         
         try:
             # Build email content
-            subject = f"[AirEase] Your Verification Code: {code}"
+            if not subject:
+                subject = f"[AirEase] Your Verification Code: {code}"
             
             html_body = self._build_verification_email_html(code, username)
             text_body = self._build_verification_email_text(code, username)
@@ -152,24 +161,35 @@ class VerificationService:
             # Create message
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
-            msg["From"] = self.from_email
+            msg["From"] = '"AirEase" <noreply@airease.ai>'
             msg["To"] = email
             
             # Attach both text and HTML versions
             msg.attach(MIMEText(text_body, "plain", "utf-8"))
             msg.attach(MIMEText(html_body, "html", "utf-8"))
             
-            # Send email
-            with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.smtp_user, self.smtp_password)
-                server.sendmail(self.from_email, email, msg.as_string())
+            # Run synchronous SMTP in a thread to avoid blocking the async event loop
+            smtp_host = self.smtp_host
+            smtp_port = self.smtp_port
+            smtp_user = self.smtp_user
+            smtp_password = self.smtp_password
+            msg_string = msg.as_string()
             
-            print(f"✅ Verification email sent to {email}")
+            def _send():
+                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    server.starttls()
+                    server.login(smtp_user, smtp_password)
+                    server.sendmail(smtp_user, email, msg_string)
+            
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _send)
+            
+            print(f"✅ Verification email sent to {email}", flush=True)
             return True
             
         except Exception as e:
-            print(f"❌ Failed to send verification email: {e}")
+            print(f"❌ Failed to send verification email: {e}", file=sys.stderr, flush=True)
+            traceback.print_exc(file=sys.stderr)
             return False
     
     def _build_verification_email_html(self, code: str, username: str) -> str:

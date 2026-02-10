@@ -340,19 +340,25 @@ class MockFlightService:
                 reliability=reliability,
                 comfort=comfort,
                 service=service,
-                value=value
+                value=value,
+                amenities=round(score_details["adjusted_scores"]["amenities"], 1),
+                efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             economyDimensions=ScoreDimensions(
                 reliability=reliability,
                 comfort=comfort_economy,
                 service=service_economy,
-                value=value
+                value=value,
+                amenities=round(score_details["adjusted_scores"]["amenities"], 1),
+                efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             businessDimensions=ScoreDimensions(
                 reliability=reliability,
                 comfort=comfort_business,
                 service=service_business,
-                value=value
+                value=value,
+                amenities=round(score_details["adjusted_scores"]["amenities"], 1),
+                efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             highlights=highlights[:3],
             explanations=explanations,

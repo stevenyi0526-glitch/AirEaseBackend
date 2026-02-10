@@ -203,6 +203,7 @@ async def verify_email(
             username=db_user.user_name,
             created_at=db_user.created_at,
             is_active=db_user.is_active,
+            is_admin=getattr(db_user, 'is_admin', False) or False,
             label=db_user.user_label,
             family_id=db_user.family_id
         )
@@ -321,6 +322,7 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
             username=user.user_name,
             created_at=user.created_at,
             is_active=user.is_active,
+            is_admin=getattr(user, 'is_admin', False) or False,
             label=user.user_label,
             family_id=user.family_id
         )
@@ -345,6 +347,7 @@ async def get_me(current_user: UserDB = Depends(require_auth)):
         username=current_user.user_name,
         created_at=current_user.created_at,
         is_active=current_user.is_active,
+        is_admin=getattr(current_user, 'is_admin', False) or False,
         label=current_user.user_label,
         family_id=current_user.family_id
     )
@@ -380,6 +383,7 @@ async def update_me(
         username=current_user.user_name,
         created_at=current_user.created_at,
         is_active=current_user.is_active,
+        is_admin=getattr(current_user, 'is_admin', False) or False,
         label=current_user.user_label,
         family_id=current_user.family_id
     )

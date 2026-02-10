@@ -52,6 +52,7 @@ class UserDB(Base):
     user_label = Column(String(20), default="business")  # business, family, student
     family_id = Column(String(36), unique=True, nullable=False)  # UUID for family grouping
     is_active = Column(Boolean, default=True)
+    is_admin = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Sort preference counters for AI recommendations

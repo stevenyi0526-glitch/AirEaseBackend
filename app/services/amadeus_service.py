@@ -217,7 +217,9 @@ class AmadeusService:
                 reliability=reliability,
                 comfort=comfort,
                 service=service,
-                value=value
+                value=value,
+                amenities=5.0 + (2.5 if is_premium else 0),
+                efficiency=10.0 if flight.stops == 0 else (8.0 if flight.stops == 1 else 6.0)
             ),
             highlights=["直飞" if flight.stops == 0 else ""],
             explanations=explanations,

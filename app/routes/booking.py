@@ -6,6 +6,7 @@ Handles flight booking redirects to airline websites
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from typing import Optional
+import httpx
 
 from app.services.booking_redirect_service import booking_redirect_service
 from app.config import settings
@@ -112,18 +113,38 @@ async def redirect_to_booking(
         
         # Check for API errors
         if "error" in serpapi_response:
+            # Check if we have a Google Flights fallback URL
+            google_flights_url = serpapi_response.get("_google_flights_url")
+            if google_flights_url:
+                return HTMLResponse(
+                    content=booking_redirect_service.generate_google_flights_fallback_html(
+                        google_flights_url=google_flights_url
+                    ),
+                    status_code=200
+                )
+            # Return 200 instead of 502 to avoid Cloudflare "Host Error" interception
             return HTMLResponse(
                 content=booking_redirect_service.generate_error_html(
-                    error_message="Failed to fetch booking options",
-                    details=serpapi_response.get("error", "Unknown error")
+                    error_message="Booking options temporarily unavailable",
+                    details="This flight's booking data could not be retrieved. Please try again or search for a new flight."
                 ),
-                status_code=502
+                status_code=200
             )
         
         # Step 2: Get booking options
         booking_options = serpapi_response.get("booking_options", [])
         
         if not booking_options:
+            # Check if we have a Google Flights fallback URL
+            google_flights_url = serpapi_response.get("_google_flights_url")
+            if google_flights_url:
+                return HTMLResponse(
+                    content=booking_redirect_service.generate_google_flights_fallback_html(
+                        google_flights_url=google_flights_url
+                    ),
+                    status_code=200
+                )
+
             # Check if this is a Chinese domestic route
             from app.services.booking_redirect_service import _get_country_code_for_airport
             dep_country = _get_country_code_for_airport(departure_id) if departure_id else ""
@@ -144,7 +165,7 @@ async def redirect_to_booking(
                     error_message="No booking options available",
                     details="This flight may no longer be available. Please try a new search."
                 ),
-                status_code=404
+                status_code=200
             )
         
         # Step 3: Find matching booking option
@@ -206,7 +227,16 @@ async def redirect_to_booking(
         )
         
         return HTMLResponse(content=redirect_html, status_code=200)
-        
+    
+    except httpx.HTTPStatusError as e:
+        print(f"❌ Booking API error: {e.response.status_code} - {e}")
+        return HTMLResponse(
+            content=booking_redirect_service.generate_error_html(
+                error_message="Booking service temporarily unavailable",
+                details="The booking data for this flight could not be retrieved. The booking token may have expired — please search again."
+            ),
+            status_code=200
+        )
     except Exception as e:
         print(f"❌ Booking redirect error: {e}")
         return HTMLResponse(
@@ -214,7 +244,7 @@ async def redirect_to_booking(
                 error_message="An error occurred",
                 details=str(e)
             ),
-            status_code=500
+            status_code=200
         )
 
 
@@ -227,6 +257,22 @@ async def get_booking_options(
     booking_token: str = Query(
         ...,
         description="Booking token from flight search results"
+    ),
+    departure_id: Optional[str] = Query(
+        None,
+        description="Departure airport IATA code (e.g., HKG)"
+    ),
+    arrival_id: Optional[str] = Query(
+        None,
+        description="Arrival airport IATA code (e.g., NRT)"
+    ),
+    outbound_date: Optional[str] = Query(
+        None,
+        description="Outbound date in YYYY-MM-DD format"
+    ),
+    return_date: Optional[str] = Query(
+        None,
+        description="Return date for round trips (YYYY-MM-DD)"
     )
 ):
     """
@@ -251,12 +297,16 @@ async def get_booking_options(
     
     try:
         response = await booking_redirect_service.get_booking_options(
-            booking_token=booking_token
+            booking_token=booking_token,
+            departure_id=departure_id,
+            arrival_id=arrival_id,
+            outbound_date=outbound_date,
+            return_date=return_date
         )
         
         if "error" in response:
             raise HTTPException(
-                status_code=502,
+                status_code=422,
                 detail=response.get("error", "Failed to fetch booking options")
             )
         

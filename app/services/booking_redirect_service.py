@@ -130,6 +130,7 @@ class BookingRedirectService:
         # Determine geolocation based on departure airport
         gl = _get_country_code_for_airport(departure_id) if departure_id else "us"
         
+        # SerpAPI booking options requires route context alongside the token
         params = {
             "engine": "google_flights",
             "booking_token": booking_token,
@@ -139,7 +140,7 @@ class BookingRedirectService:
             "currency": currency,
         }
         
-        # Add route context if provided
+        # Add required route context params
         if departure_id:
             params["departure_id"] = departure_id
         if arrival_id:
@@ -153,9 +154,83 @@ class BookingRedirectService:
             params["type"] = "2"  # One way
         
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(self.BASE_URL, params=params)
-            response.raise_for_status()
-            return response.json()
+            try:
+                response = await client.get(self.BASE_URL, params=params)
+                response.raise_for_status()
+                data = response.json()
+            except httpx.HTTPStatusError as e:
+                # SerpAPI returned 400/4xx — try without route context params
+                print(f"⚠️ Booking: SerpAPI HTTP {e.response.status_code} with full params, retrying token-only...")
+                minimal_params = {
+                    "engine": "google_flights",
+                    "booking_token": booking_token,
+                    "api_key": self.api_key,
+                    "hl": "en",
+                    "gl": gl,
+                    "currency": currency,
+                }
+                try:
+                    retry_resp = await client.get(self.BASE_URL, params=minimal_params)
+                    retry_resp.raise_for_status()
+                    data = retry_resp.json()
+                    if data.get("booking_options"):
+                        return data
+                except httpx.HTTPStatusError:
+                    pass
+                
+                # Both attempts failed — build fallback Google Flights URL
+                print(f"⚠️ Booking: All SerpAPI attempts failed, building fallback URL")
+                gf_url = self._build_google_flights_url(departure_id, arrival_id, outbound_date, return_date)
+                return {
+                    "error": f"Booking service returned {e.response.status_code}",
+                    "_google_flights_url": gf_url
+                }
+            
+            # If SerpAPI returned an error in the body (HTTP 200 but no results),
+            # retry without route context params (may help for return-leg tokens)
+            if "error" in data and not data.get("booking_options"):
+                print(f"⚠️ Booking: SerpAPI body error — {data.get('error')}, retrying token-only...")
+                minimal_params = {
+                    "engine": "google_flights",
+                    "booking_token": booking_token,
+                    "api_key": self.api_key,
+                    "hl": "en",
+                    "gl": gl,
+                    "currency": currency,
+                }
+                try:
+                    retry_resp = await client.get(self.BASE_URL, params=minimal_params)
+                    retry_resp.raise_for_status()
+                    retry_data = retry_resp.json()
+                    if retry_data.get("booking_options"):
+                        return retry_data
+                except Exception:
+                    pass
+                
+                # Still no luck — store Google Flights URL for fallback
+                gf_url = data.get("search_metadata", {}).get("google_flights_url", "")
+                if not gf_url:
+                    gf_url = self._build_google_flights_url(departure_id, arrival_id, outbound_date, return_date)
+                data["_google_flights_url"] = gf_url
+            
+            return data
+    
+    def _build_google_flights_url(
+        self,
+        departure_id: Optional[str] = None,
+        arrival_id: Optional[str] = None,
+        outbound_date: Optional[str] = None,
+        return_date: Optional[str] = None
+    ) -> str:
+        """Build a direct Google Flights search URL as fallback."""
+        base = "https://www.google.com/travel/flights"
+        if departure_id and arrival_id and outbound_date:
+            # Google Flights URL format: /flights/DEP-ARR/2026-02-28
+            path = f"/flights/{departure_id}-{arrival_id}/{outbound_date}"
+            if return_date:
+                path += f"/{return_date}"
+            return base + path
+        return base
     
     def find_booking_option(
         self,
@@ -567,6 +642,84 @@ class BookingRedirectService:
 </html>
 """
     
+    def generate_google_flights_fallback_html(self, google_flights_url: str) -> str:
+        """Generate HTML page that redirects user to Google Flights when SerpAPI booking fails."""
+        return f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redirecting to Google Flights - AirEase</title>
+    <meta http-equiv="refresh" content="3;url={google_flights_url}">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }}
+        .container {{
+            background: white;
+            border-radius: 20px;
+            padding: 40px;
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+        }}
+        .icon {{ font-size: 48px; margin-bottom: 20px; }}
+        h1 {{ color: #333; font-size: 22px; margin-bottom: 15px; }}
+        .message {{
+            color: #666;
+            font-size: 16px;
+            margin-bottom: 25px;
+            line-height: 1.6;
+        }}
+        .redirect-btn {{
+            background: linear-gradient(135deg, #4285f4 0%, #34a853 100%);
+            color: white;
+            border: none;
+            padding: 14px 35px;
+            font-size: 16px;
+            font-weight: 600;
+            border-radius: 8px;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+            margin-bottom: 15px;
+        }}
+        .redirect-btn:hover {{ opacity: 0.9; }}
+        .auto-note {{ color: #999; font-size: 13px; }}
+        .spinner {{
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #4285f4;
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+            margin: 15px auto;
+        }}
+        @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="icon">✈️</div>
+        <h1>Redirecting to Google Flights</h1>
+        <p class="message">Direct booking isn't available for this flight segment.<br>We're taking you to Google Flights to complete your booking.</p>
+        <div class="spinner"></div>
+        <a href="{google_flights_url}" class="redirect-btn">Go to Google Flights →</a>
+        <p class="auto-note">You'll be redirected automatically in 3 seconds...</p>
+    </div>
+</body>
+</html>
+"""
+
     def generate_phone_booking_html(
         self,
         airline_name: str,
@@ -576,15 +729,6 @@ class BookingRedirectService:
     ) -> str:
         """
         Generate HTML page for phone-only bookings.
-        
-        Args:
-            airline_name: Airline name
-            phone_number: Booking phone number
-            price: Optional price
-            fee: Optional phone service fee
-        
-        Returns:
-            HTML string for the phone booking page
         """
         price_display = f"${price:.0f}" if price else ""
         fee_note = f"<p class='fee-note'>Note: Phone booking fee may apply (~${fee:.0f})</p>" if fee else ""

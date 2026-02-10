@@ -123,6 +123,8 @@ class ScoreDimensions(BaseModel):
     comfort: float = Field(ge=0, le=10)
     service: float = Field(ge=0, le=10)
     value: float = Field(ge=0, le=10)
+    amenities: float = Field(default=5.0, ge=0, le=10)  # WiFi, power, IFE, meals
+    efficiency: float = Field(default=5.0, ge=0, le=10)  # Direct flight bonus, duration
 
 
 class CabinClassScores(BaseModel):
@@ -449,6 +451,7 @@ class UserResponse(UserBase):
     id: int
     created_at: datetime
     is_active: bool = True
+    is_admin: bool = False
     label: str = "business"
     family_id: str = Field(alias="familyId")
 

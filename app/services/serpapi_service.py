@@ -990,19 +990,25 @@ class SerpAPIFlightService:
                 reliability=round(reliability, 1),
                 comfort=round(comfort, 1),
                 service=round(service, 1),
-                value=round(value, 1)
+                value=round(value, 1),
+                amenities=round(score_details["adjusted_scores"]["amenities"], 1),
+                efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             economy_dimensions=ScoreDimensions(
                 reliability=round(reliability, 1),
                 comfort=round(comfort_economy, 1),
                 service=round(service_economy, 1),
-                value=round(value, 1)
+                value=round(value, 1),
+                amenities=round(score_details["adjusted_scores"]["amenities"], 1),
+                efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             business_dimensions=ScoreDimensions(
                 reliability=round(reliability, 1),
                 comfort=round(comfort_business, 1),
                 service=round(service_business, 1),
-                value=round(value, 1)
+                value=round(value, 1),
+                amenities=round(score_details["adjusted_scores"]["amenities"], 1),
+                efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             highlights=highlights[:5],
             explanations=explanations,

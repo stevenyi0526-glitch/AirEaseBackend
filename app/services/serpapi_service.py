@@ -987,6 +987,7 @@ class SerpAPIFlightService:
         return FlightScore(
             overall_score=overall,
             dimensions=ScoreDimensions(
+                safety=round(score_details["adjusted_scores"]["safety"], 1),
                 reliability=round(reliability, 1),
                 comfort=round(comfort, 1),
                 service=round(service, 1),
@@ -995,6 +996,7 @@ class SerpAPIFlightService:
                 efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             economy_dimensions=ScoreDimensions(
+                safety=round(score_details["adjusted_scores"]["safety"], 1),
                 reliability=round(reliability, 1),
                 comfort=round(comfort_economy, 1),
                 service=round(service_economy, 1),
@@ -1003,6 +1005,7 @@ class SerpAPIFlightService:
                 efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             business_dimensions=ScoreDimensions(
+                safety=round(score_details["adjusted_scores"]["safety"], 1),
                 reliability=round(reliability, 1),
                 comfort=round(comfort_business, 1),
                 service=round(service_business, 1),
@@ -1061,13 +1064,15 @@ class SerpAPIFlightService:
         )
 
 
-# Airport code mapping for city names (extend as needed)
+# City-to-code mapping for SerpAPI Google Flights
+# SerpAPI accepts both city codes (TYO = all Tokyo airports) and airport codes (NRT).
+# We prefer CITY codes so that SerpAPI searches ALL airports in a metro area.
 CITY_TO_AIRPORT_CODE = {
     # China
     "北京": "PEK",
     "beijing": "PEK",
-    "上海": "SHA",
-    "shanghai": "SHA",
+    "上海": "PVG",    # PVG is Shanghai's main international airport
+    "shanghai": "PVG",
     "广州": "CAN",
     "guangzhou": "CAN",
     "深圳": "SZX",
@@ -1078,36 +1083,138 @@ CITY_TO_AIRPORT_CODE = {
     "hangzhou": "HGH",
     "香港": "HKG",
     "hong kong": "HKG",
-    # International
-    "tokyo": "NRT",
+    "武汉": "WUH",
+    "wuhan": "WUH",
+    "西安": "XIY",
+    "xian": "XIY",
+    "南京": "NKG",
+    "nanjing": "NKG",
+    "重庆": "CKG",
+    "chongqing": "CKG",
+    "厦门": "XMN",
+    "xiamen": "XMN",
+    "昆明": "KMG",
+    "kunming": "KMG",
+    "大连": "DLC",
+    "dalian": "DLC",
+    "青岛": "TAO",
+    "qingdao": "TAO",
+    "三亚": "SYX",
+    "sanya": "SYX",
+    "海口": "HAK",
+    "haikou": "HAK",
+    # International - use PRIMARY airport codes (SerpAPI doesn't support city codes)
+    "tokyo": "NRT",    # Narita is the primary international airport
     "东京": "NRT",
-    "london": "LHR",
+    "london": "LHR",   # Heathrow is the primary airport
     "伦敦": "LHR",
-    "paris": "CDG",
+    "paris": "CDG",    # Charles de Gaulle is the primary airport
     "巴黎": "CDG",
-    "new york": "JFK",
+    "new york": "JFK",  # JFK is the primary international airport
     "纽约": "JFK",
     "los angeles": "LAX",
     "洛杉矶": "LAX",
     "singapore": "SIN",
     "新加坡": "SIN",
-    "seoul": "ICN",
+    "seoul": "ICN",    # Incheon is the primary international airport
     "首尔": "ICN",
     "sydney": "SYD",
     "悉尼": "SYD",
+    "osaka": "KIX",    # Kansai is the primary international airport
+    "大阪": "KIX",
+    "taipei": "TPE",
+    "台北": "TPE",
+    "bangkok": "BKK",
+    "曼谷": "BKK",
+    "dubai": "DXB",
+    "迪拜": "DXB",
+    "kuala lumpur": "KUL",
+    "吉隆坡": "KUL",
+    "mumbai": "BOM",
+    "delhi": "DEL",
+    "istanbul": "IST",
+    "frankfurt": "FRA",
+    "amsterdam": "AMS",
+    "toronto": "YYZ",
+    "vancouver": "YVR",
+    "madrid": "MAD",
+    "barcelona": "BCN",
+    "rome": "FCO",     # Fiumicino is the primary airport
+    "melbourne": "MEL",
+    "san francisco": "SFO",
+    "chicago": "ORD",  # O'Hare is the primary international airport
+    "芝加哥": "ORD",
+    "washington": "IAD", # Dulles is the primary international airport
+    "华盛顿": "IAD",
+    "moscow": "SVO",   # Sheremetyevo is the primary airport
+    "莫斯科": "SVO",
+    "jakarta": "CGK",  # Soekarno-Hatta is the primary airport
+    "雅加达": "CGK",
+    "manila": "MNL",
+    "马尼拉": "MNL",
+    "ho chi minh": "SGN",
+    "胡志明": "SGN",
+    "hanoi": "HAN",
+    "河内": "HAN",
+}
+
+# City codes → primary airport codes
+# SerpAPI Google Flights does NOT support IATA city codes (PAR, LON, NYC, TYO, etc.)
+# These must be resolved to actual airport IATA codes before calling SerpAPI.
+# This mapping handles codes that may come from Amadeus autocomplete or user input.
+CITY_CODE_TO_AIRPORT = {
+    "PAR": "CDG",   # Paris → Charles de Gaulle
+    "LON": "LHR",   # London → Heathrow
+    "NYC": "JFK",   # New York → JFK
+    "TYO": "NRT",   # Tokyo → Narita
+    "SEL": "ICN",   # Seoul → Incheon
+    "OSA": "KIX",   # Osaka → Kansai
+    "CHI": "ORD",   # Chicago → O'Hare
+    "WAS": "IAD",   # Washington → Dulles
+    "ROM": "FCO",   # Rome → Fiumicino
+    "MOW": "SVO",   # Moscow → Sheremetyevo
+    "JKT": "CGK",   # Jakarta → Soekarno-Hatta
+    "SHA": "PVG",   # Shanghai → Pudong
+    "YTO": "YYZ",   # Toronto → Pearson
+    "BUE": "EZE",   # Buenos Aires → Ezeiza
+    "SAO": "GRU",   # São Paulo → Guarulhos
+    "BJS": "PEK",   # Beijing → Capital
+    "MIL": "MXP",   # Milan → Malpensa
+    "STO": "ARN",   # Stockholm → Arlanda
+    "RIO": "GIG",   # Rio de Janeiro → Galeão
+    "BER": "BER",   # Berlin → BER (same code, new airport)
+    "MEX": "MEX",   # Mexico City → MEX (same code)
+    "YMQ": "YUL",   # Montreal → Trudeau
 }
 
 
 def get_airport_code(city_name: str) -> str:
-    """Convert city name to airport code."""
-    city_lower = city_name.lower().strip()
+    """
+    Convert city/place name to airport IATA code for SerpAPI.
     
-    # Check if already an airport code (3 letters)
-    if len(city_name) == 3 and city_name.isupper():
-        return city_name
+    IMPORTANT: SerpAPI Google Flights does NOT support IATA city codes 
+    (PAR, LON, NYC, TYO, SEL, OSA, CHI, etc.). These must be resolved 
+    to actual airport IATA codes (CDG, LHR, JFK, NRT, ICN, KIX, ORD).
+    """
+    city_stripped = city_name.strip()
     
-    # Look up in mapping
-    return CITY_TO_AIRPORT_CODE.get(city_lower, city_name.upper()[:3])
+    # Check if already a valid code (2-4 uppercase letters)
+    if 2 <= len(city_stripped) <= 4 and city_stripped.isalpha() and city_stripped.isupper():
+        # CRITICAL: Resolve city codes to airport codes before returning
+        # e.g., PAR → CDG, LON → LHR, NYC → JFK, TYO → NRT
+        if city_stripped in CITY_CODE_TO_AIRPORT:
+            resolved = CITY_CODE_TO_AIRPORT[city_stripped]
+            print(f"[get_airport_code] Resolved city code {city_stripped} → {resolved}")
+            return resolved
+        return city_stripped
+    
+    # Look up in mapping (case-insensitive)
+    city_lower = city_stripped.lower()
+    if city_lower in CITY_TO_AIRPORT_CODE:
+        return CITY_TO_AIRPORT_CODE[city_lower]
+    
+    # Fallback: return as-is uppercased (SerpAPI will try to resolve it)
+    return city_stripped.upper()[:3]
 
 
 # ============================================================

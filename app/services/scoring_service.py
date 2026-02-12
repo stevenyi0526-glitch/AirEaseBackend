@@ -24,6 +24,7 @@ class TravelerType(str, Enum):
 @dataclass
 class DimensionWeights:
     """Weights for each scoring dimension (must sum to 1.0)"""
+    safety: float     # NTSB safety records
     reliability: float
     comfort: float
     service: float
@@ -36,41 +37,45 @@ class DimensionWeights:
 TRAVELER_WEIGHTS: Dict[TravelerType, DimensionWeights] = {
     # Students: Most price-sensitive, prefer direct flights to save time/hassle
     TravelerType.STUDENT: DimensionWeights(
-        reliability=0.15,  # Less critical, can handle some delays
-        comfort=0.15,      # Basic comfort is fine
-        service=0.10,      # Service is lower priority
-        value=0.35,        # Price is most important!
-        amenities=0.10,    # Nice to have but not essential
-        efficiency=0.15,   # Prefer direct flights
+        safety=0.10,       # Safety still matters
+        reliability=0.12,
+        comfort=0.12,
+        service=0.08,
+        value=0.33,        # Price is most important!
+        amenities=0.10,
+        efficiency=0.15,
     ),
     
     # Business travelers: Time is money, need reliability and premium service
     TravelerType.BUSINESS: DimensionWeights(
-        reliability=0.30,  # Cannot miss meetings!
-        comfort=0.20,      # Need to arrive refreshed
-        service=0.20,      # Premium service expected
-        value=0.10,        # Price less important
-        amenities=0.10,    # WiFi for work
-        efficiency=0.10,   # Prefer shortest route
+        safety=0.10,
+        reliability=0.25,
+        comfort=0.18,
+        service=0.18,
+        value=0.09,
+        amenities=0.10,
+        efficiency=0.10,
     ),
     
     # Families: Comfort and service matter most for kids
     TravelerType.FAMILY: DimensionWeights(
-        reliability=0.20,  # Important with kids
-        comfort=0.25,      # Kids need space
-        service=0.25,      # Good service for families
-        value=0.15,        # Budget conscious but not primary
-        amenities=0.10,    # Entertainment for kids
-        efficiency=0.05,   # Can handle longer flights
+        safety=0.15,       # Safety especially important for families
+        reliability=0.17,
+        comfort=0.22,
+        service=0.22,
+        value=0.12,
+        amenities=0.08,
+        efficiency=0.04,
     ),
     
     # Default/General: Balanced weights
     TravelerType.DEFAULT: DimensionWeights(
-        reliability=0.20,
-        comfort=0.25,
-        service=0.20,
-        value=0.20,
-        amenities=0.10,
+        safety=0.12,
+        reliability=0.17,
+        comfort=0.22,
+        service=0.17,
+        value=0.18,
+        amenities=0.09,
         efficiency=0.05,
     ),
 }
@@ -82,19 +87,71 @@ class ScoringService:
     
     The scoring algorithm:
     1. Takes 4 base dimension scores (reliability, comfort, service, value)
-    2. Calculates 2 derived dimensions (amenities, efficiency)
-    3. Applies traveler-specific weights
-    4. NO artificial boosting - scores reflect true quality
+    2. Calculates safety score from NTSB records
+    3. Calculates 2 derived dimensions (amenities, efficiency)
+    4. Applies traveler-specific weights
+    5. NO artificial boosting - scores reflect true quality
     """
     
     # Baseline score - minimum score for "soft" dimensions (comfort, service, amenities)
-    # Hard dimensions (reliability, efficiency, value) use actual scores
+    # Soft dimensions have data uncertainty, so we apply a gentle floor
     SOFT_BASELINE_SCORE = 5.0
     
-    # Score boosting parameters - REDUCED to be more honest
-    # Target: Best flights 85-95, average 65-80, poor 50-65
-    SCORE_BOOST_FACTOR = 1.05  # Slight boost only
-    SCORE_BOOST_OFFSET = 0.0   # No offset - use actual scores
+    # Boost factor for soft dimensions to acknowledge measurement uncertainty
+    # A 10% boost ensures scores feel fair when data is limited
+    SCORE_BOOST_FACTOR = 1.10
+    SCORE_BOOST_OFFSET = 0.0
+    
+    @classmethod
+    def calculate_safety_score(
+        cls,
+        airline_accidents: int = 0,
+        model_accidents: int = 0,
+        plane_accidents: Optional[int] = None,
+        has_fatal: bool = False,
+        fatal_count: int = 0,
+        has_serious: bool = False,
+        serious_count: int = 0,
+    ) -> float:
+        """
+        Calculate safety score (0-10) fully based on NTSB records.
+        
+        Scoring:
+        - 10 (5/5): No records at all — clean history
+        - 8 (4/5): Minor incidents only, no injuries
+        - 6 (3/5): Some incidents with minor injuries
+        - 4 (2/5): Serious incidents
+        - 2 (1/5): Fatal accidents with casualties
+        
+        Deductions based on severity:
+        - Each airline accident: -0.3 pts
+        - Each model accident: -0.15 pts  
+        - Each plane-specific accident: -1.0 pts
+        - Serious injury incidents: -1.5 pts each
+        - Fatal accidents: -2.0 pts base + -0.5 per fatality (capped)
+        """
+        score = 10.0  # Start at perfect
+        
+        # Deduct for airline-level accidents (last 10 years)
+        score -= min(airline_accidents * 0.3, 3.0)
+        
+        # Deduct for model-level accidents (all time)
+        score -= min(model_accidents * 0.15, 2.0)
+        
+        # Deduct for this specific plane's accidents
+        if plane_accidents is not None:
+            score -= min(plane_accidents * 1.0, 3.0)
+        
+        # Deduct for serious injuries
+        if has_serious:
+            score -= min(serious_count * 1.5, 3.0)
+        
+        # Deduct for fatalities — most severe
+        if has_fatal:
+            score -= 2.0  # Base deduction for any fatality
+            score -= min(fatal_count * 0.5, 3.0)  # Additional per fatality
+        
+        return round(max(2.0, min(10.0, score)), 1)
     
     @classmethod
     def calculate_amenities_score(
@@ -124,17 +181,18 @@ class ScoringService:
         if has_wifi:
             amenity_scores.append(2.5)
         if has_power:
-            amenity_scores.append(2.5)
+            amenity_scores.append(2.0)
         if has_ife:
             amenity_scores.append(2.5)
         if has_meal:
-            amenity_scores.append(2.5)
+            amenity_scores.append(2.0)
         
         if amenity_scores:
-            # Sum amenities (max 10 if all present)
-            score = sum(amenity_scores)
-            # Return actual score - no artificial floor
-            return score
+            # Base score of 4.0 for having any amenity data, plus bonuses
+            # This prevents "1 amenity = 2.5/10" which feels too harsh
+            score = 4.0 + sum(amenity_scores)
+            # Cap at 10
+            return min(10.0, score)
         else:
             # No amenity data - use comfort score as proxy
             return base_comfort_score
@@ -255,25 +313,13 @@ class ScoringService:
         stops: int = 0,
         duration_minutes: Optional[int] = None,
         shortest_duration: Optional[int] = None,
-        apply_boost: bool = True
+        apply_boost: bool = True,
+        safety_score: Optional[float] = None,
     ) -> Tuple[float, Dict[str, Any]]:
         """
         Calculate overall score with traveler-specific weighting.
-        
-        Args:
-            reliability: Reliability score (0-10)
-            comfort: Comfort score (0-10)
-            service: Service score (0-10)
-            value: Value score (0-10)
-            traveler_type: "student", "business", "family", or "default"
-            has_wifi, has_power, has_ife, has_meal: Amenity flags
-            stops: Number of stops
-            duration_minutes: Flight duration
-            shortest_duration: Shortest flight duration for this route (baseline for scoring)
-            apply_boost: Whether to apply score boosting
-            
-        Returns:
-            Tuple of (overall_score, details_dict)
+        Now includes 7 dimensions: safety, reliability, comfort, service,
+        value, amenities, efficiency.
         """
         # Get weights for traveler type
         try:
@@ -291,22 +337,20 @@ class ScoringService:
             stops, duration_minutes, shortest_duration
         )
         
-        # Apply different scoring approaches:
-        # - Hard dimensions (reliability, efficiency, value): Use ACTUAL scores
-        #   These have objective data and should reflect true performance
-        # - Soft dimensions (comfort, service, amenities): Apply soft baseline
-        #   These are harder to measure and may need a minimum floor
+        # Safety defaults to 10.0 (no records = perfect) if not provided
+        safety = safety_score if safety_score is not None else 10.0
+        
         if apply_boost:
-            # HARD scoring - no floor, use actual values
+            safety_adj = cls.apply_hard_score(safety)
             reliability_adj = cls.apply_hard_score(reliability)
             efficiency_adj = cls.apply_hard_score(efficiency)
             value_adj = cls.apply_hard_score(value)
             
-            # SOFT scoring - apply minimal baseline
             comfort_adj = cls.apply_soft_baseline(comfort)
             service_adj = cls.apply_soft_baseline(service)
             amenities_adj = cls.apply_soft_baseline(amenities)
         else:
+            safety_adj = safety
             reliability_adj = reliability
             comfort_adj = comfort
             service_adj = service
@@ -316,6 +360,7 @@ class ScoringService:
         
         # Calculate weighted overall score
         overall = (
+            safety_adj * weights.safety +
             reliability_adj * weights.reliability +
             comfort_adj * weights.comfort +
             service_adj * weights.service +
@@ -331,6 +376,7 @@ class ScoringService:
         details = {
             "traveler_type": tt.value,
             "weights": {
+                "safety": weights.safety,
                 "reliability": weights.reliability,
                 "comfort": weights.comfort,
                 "service": weights.service,
@@ -339,6 +385,7 @@ class ScoringService:
                 "efficiency": weights.efficiency,
             },
             "raw_scores": {
+                "safety": round(safety, 1),
                 "reliability": round(reliability, 1),
                 "comfort": round(comfort, 1),
                 "service": round(service, 1),
@@ -347,6 +394,7 @@ class ScoringService:
                 "efficiency": round(efficiency, 1),
             },
             "adjusted_scores": {
+                "safety": round(safety_adj, 1),
                 "reliability": round(reliability_adj, 1),
                 "comfort": round(comfort_adj, 1),
                 "service": round(service_adj, 1),

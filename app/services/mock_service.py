@@ -337,6 +337,7 @@ class MockFlightService:
         return FlightScore(
             overallScore=overall,
             dimensions=ScoreDimensions(
+                safety=round(score_details["adjusted_scores"]["safety"], 1),
                 reliability=reliability,
                 comfort=comfort,
                 service=service,
@@ -345,6 +346,7 @@ class MockFlightService:
                 efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             economyDimensions=ScoreDimensions(
+                safety=round(score_details["adjusted_scores"]["safety"], 1),
                 reliability=reliability,
                 comfort=comfort_economy,
                 service=service_economy,
@@ -353,6 +355,7 @@ class MockFlightService:
                 efficiency=round(score_details["adjusted_scores"]["efficiency"], 1)
             ),
             businessDimensions=ScoreDimensions(
+                safety=round(score_details["adjusted_scores"]["safety"], 1),
                 reliability=reliability,
                 comfort=comfort_business,
                 service=service_business,

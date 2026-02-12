@@ -13,27 +13,29 @@ from app.models import CitySearchResult
 router = APIRouter(prefix="/v1/cities", tags=["Cities"])
 
 # Airport code mappings for major cities
+# IMPORTANT: Use actual airport IATA codes, NOT city codes.
+# SerpAPI Google Flights does NOT support city codes (PAR, LON, NYC, TYO, etc.)
 CITY_AIRPORT_CODES = {
     "hong kong": "HKG",
-    "london": "LHR",
-    "tokyo": "NRT",
-    "new york": "JFK",
+    "london": "LHR",      # Heathrow — primary international airport
+    "tokyo": "NRT",       # Narita — primary international airport
+    "new york": "JFK",    # JFK — primary international airport
     "los angeles": "LAX",
     "singapore": "SIN",
     "dubai": "DXB",
-    "paris": "CDG",
+    "paris": "CDG",       # Charles de Gaulle — primary international airport
     "sydney": "SYD",
     "beijing": "PEK",
-    "shanghai": "PVG",
-    "seoul": "ICN",
+    "shanghai": "PVG",    # Pudong — primary international airport
+    "seoul": "ICN",       # Incheon — primary international airport
     "bangkok": "BKK",
     "melbourne": "MEL",
     "frankfurt": "FRA",
     "amsterdam": "AMS",
-    "toronto": "YYZ",
+    "toronto": "YYZ",     # Pearson — primary airport
     "vancouver": "YVR",
     "san francisco": "SFO",
-    "chicago": "ORD",
+    "chicago": "ORD",     # O'Hare — primary international airport
     "miami": "MIA",
     "taipei": "TPE",
     "kuala lumpur": "KUL",
@@ -42,7 +44,7 @@ CITY_AIRPORT_CODES = {
     "delhi": "DEL",
     "madrid": "MAD",
     "barcelona": "BCN",
-    "rome": "FCO",
+    "rome": "FCO",        # Fiumicino — primary airport
     "zurich": "ZRH",
     "vienna": "VIE",
     "istanbul": "IST",
@@ -53,17 +55,18 @@ CITY_AIRPORT_CODES = {
     "boston": "BOS",
     "atlanta": "ATL",
     "denver": "DEN",
-    "osaka": "KIX",
+    "osaka": "KIX",       # Kansai — primary international airport
     "guangzhou": "CAN",
     "shenzhen": "SZX",
     "hangzhou": "HGH",
     "chengdu": "CTU",
     "xi'an": "XIY",
-    "taipei": "TPE",
     "ho chi minh": "SGN",
     "hanoi": "HAN",
-    "jakarta": "CGK",
+    "jakarta": "CGK",     # Soekarno-Hatta — primary airport
     "bali": "DPS",
+    "washington": "IAD",  # Dulles — primary international airport
+    "moscow": "SVO",      # Sheremetyevo — primary airport
 }
 
 
@@ -154,7 +157,8 @@ async def search_cities_google(query: str, limit: int) -> List[CitySearchResult]
 def search_cities_local(query: str, limit: int) -> List[CitySearchResult]:
     """Search cities using local data (fallback)."""
     
-    # Local city database
+    # Local city database - uses actual airport IATA codes (NOT city codes)
+    # SerpAPI does NOT support city codes like PAR, LON, NYC, TYO
     cities = [
         {"city": "Hong Kong", "country": "Hong Kong", "code": "HKG"},
         {"city": "London", "country": "United Kingdom", "code": "LHR"},
@@ -200,10 +204,12 @@ def search_cities_local(query: str, limit: int) -> List[CitySearchResult]:
         {"city": "Shenzhen", "country": "China", "code": "SZX"},
         {"city": "Hangzhou", "country": "China", "code": "HGH"},
         {"city": "Chengdu", "country": "China", "code": "CTU"},
+        {"city": "Washington", "country": "United States", "code": "IAD"},
         {"city": "Ho Chi Minh City", "country": "Vietnam", "code": "SGN"},
         {"city": "Hanoi", "country": "Vietnam", "code": "HAN"},
         {"city": "Jakarta", "country": "Indonesia", "code": "CGK"},
         {"city": "Bali", "country": "Indonesia", "code": "DPS"},
+        {"city": "Moscow", "country": "Russia", "code": "SVO"},
     ]
     
     query_lower = query.lower()

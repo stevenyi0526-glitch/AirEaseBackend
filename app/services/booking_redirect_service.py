@@ -112,9 +112,14 @@ class BookingRedirectService:
         """
         Fetch booking options from SerpAPI using a booking_token.
         
-        The booking_token requires the original search context to work properly.
-        If departure_id/arrival_id/outbound_date are not provided, they will be
-        extracted from the booking_token if possible.
+        The booking_token is self-contained — it encodes the flight segments,
+        trip type, and dates. Per SerpAPI docs: "parameters related to date and
+        parameters inside 'Advanced Filters' section won't affect the result."
+        
+        Strategy:
+          1. First try with token + minimal context (most reliable)
+          2. If that fails, retry with route context params
+          3. Final fallback: Google Flights search URL
         
         Args:
             booking_token: The booking token from a flight search result
@@ -130,8 +135,18 @@ class BookingRedirectService:
         # Determine geolocation based on departure airport
         gl = _get_country_code_for_airport(departure_id) if departure_id else "us"
         
-        # SerpAPI booking options requires route context alongside the token
-        params = {
+        # SerpAPI Google Flights booking endpoint requires:
+        #   - booking_token (always)
+        #   - departure_id (always required)
+        #   - type: 1=round-trip, 2=one-way (required, defaults to 1 which requires return_date)
+        #   - outbound_date (required when departure_id is set)
+        #
+        # Strategy:
+        #   1. Try type=2 (one-way) with departure_id + outbound_date — works for most tokens
+        #   2. If return_date provided, also try type=1 (round-trip)
+        #   3. Fallback: redirect to Google Flights search URL
+        
+        base_params = {
             "engine": "google_flights",
             "booking_token": booking_token,
             "api_key": self.api_key,
@@ -140,80 +155,89 @@ class BookingRedirectService:
             "currency": currency,
         }
         
-        # Add required route context params
-        if departure_id:
-            params["departure_id"] = departure_id
-        if arrival_id:
-            params["arrival_id"] = arrival_id
-        if outbound_date:
-            params["outbound_date"] = outbound_date
-        if return_date:
-            params["return_date"] = return_date
-            params["type"] = "1"  # Round trip
-        else:
-            params["type"] = "2"  # One way
+        # Build attempts list — try one-way first (most common for individual flight booking)
+        attempts = []
         
+        # Attempt 1: One-way with route context (most reliable)
+        oneway_params = {**base_params, "type": "2"}
+        if departure_id:
+            oneway_params["departure_id"] = departure_id
+        if arrival_id:
+            oneway_params["arrival_id"] = arrival_id
+        if outbound_date:
+            oneway_params["outbound_date"] = outbound_date
+        attempts.append(("one-way", oneway_params))
+        
+        # Attempt 2: If return_date provided, try round-trip
+        if return_date:
+            roundtrip_params = {
+                **base_params,
+                "type": "1",
+            }
+            if departure_id:
+                roundtrip_params["departure_id"] = departure_id
+            if arrival_id:
+                roundtrip_params["arrival_id"] = arrival_id
+            if outbound_date:
+                roundtrip_params["outbound_date"] = outbound_date
+            roundtrip_params["return_date"] = return_date
+            attempts.append(("round-trip", roundtrip_params))
+        
+        data = None
         async with httpx.AsyncClient(timeout=60.0) as client:
-            try:
-                response = await client.get(self.BASE_URL, params=params)
-                response.raise_for_status()
-                data = response.json()
-            except httpx.HTTPStatusError as e:
-                # SerpAPI returned 400/4xx — try without route context params
-                print(f"⚠️ Booking: SerpAPI HTTP {e.response.status_code} with full params, retrying token-only...")
-                minimal_params = {
-                    "engine": "google_flights",
-                    "booking_token": booking_token,
-                    "api_key": self.api_key,
-                    "hl": "en",
-                    "gl": gl,
-                    "currency": currency,
-                }
+            for label, params in attempts:
                 try:
-                    retry_resp = await client.get(self.BASE_URL, params=minimal_params)
-                    retry_resp.raise_for_status()
-                    data = retry_resp.json()
-                    if data.get("booking_options"):
-                        return data
-                except httpx.HTTPStatusError:
-                    pass
-                
-                # Both attempts failed — build fallback Google Flights URL
-                print(f"⚠️ Booking: All SerpAPI attempts failed, building fallback URL")
-                gf_url = self._build_google_flights_url(departure_id, arrival_id, outbound_date, return_date)
-                return {
-                    "error": f"Booking service returned {e.response.status_code}",
-                    "_google_flights_url": gf_url
-                }
+                    print(f"🔍 Booking: Trying {label} request (gl={gl}, dep={departure_id})...")
+                    response = await client.get(self.BASE_URL, params=params)
+                    response.raise_for_status()
+                    resp_data = response.json()
+                    
+                    if resp_data.get("booking_options"):
+                        print(f"✅ Booking: Got {len(resp_data['booking_options'])} options with {label}")
+                        return resp_data
+                    
+                    # HTTP 200 but no booking_options — save and try next
+                    print(f"⚠️ Booking: {label} returned no booking_options")
+                    if data is None:
+                        data = resp_data
+                except httpx.HTTPStatusError as e:
+                    error_body = ""
+                    try:
+                        error_body = e.response.json().get("error", e.response.text[:200])
+                    except Exception:
+                        error_body = e.response.text[:200] if e.response.text else ""
+                    print(f"⚠️ Booking: {label} HTTP {e.response.status_code}: {error_body}")
+                    if data is None:
+                        try:
+                            data = e.response.json()
+                        except Exception:
+                            pass
+                except Exception as e:
+                    print(f"⚠️ Booking: {label} error: {e}")
             
-            # If SerpAPI returned an error in the body (HTTP 200 but no results),
-            # retry without route context params (may help for return-leg tokens)
-            if "error" in data and not data.get("booking_options"):
-                print(f"⚠️ Booking: SerpAPI body error — {data.get('error')}, retrying token-only...")
-                minimal_params = {
-                    "engine": "google_flights",
-                    "booking_token": booking_token,
-                    "api_key": self.api_key,
-                    "hl": "en",
-                    "gl": gl,
-                    "currency": currency,
-                }
-                try:
-                    retry_resp = await client.get(self.BASE_URL, params=minimal_params)
-                    retry_resp.raise_for_status()
-                    retry_data = retry_resp.json()
-                    if retry_data.get("booking_options"):
-                        return retry_data
-                except Exception:
-                    pass
-                
-                # Still no luck — store Google Flights URL for fallback
+            # --- Both attempts failed — build fallback ---
+            print(f"⚠️ Booking: All SerpAPI attempts failed, building fallback URL")
+            
+            # Try to get google_flights_url from the response metadata
+            gf_url = ""
+            if data and isinstance(data, dict):
                 gf_url = data.get("search_metadata", {}).get("google_flights_url", "")
-                if not gf_url:
-                    gf_url = self._build_google_flights_url(departure_id, arrival_id, outbound_date, return_date)
-                data["_google_flights_url"] = gf_url
             
-            return data
+            # Always prefer our own built URL (the SerpAPI one can be broken/encoded)
+            built_url = self._build_google_flights_url(departure_id, arrival_id, outbound_date, return_date)
+            if built_url != "https://www.google.com/travel/flights":
+                gf_url = built_url
+            elif not gf_url:
+                gf_url = built_url
+            
+            if data and isinstance(data, dict):
+                data["_google_flights_url"] = gf_url
+                return data
+            
+            return {
+                "error": "Booking options unavailable",
+                "_google_flights_url": gf_url
+            }
     
     def _build_google_flights_url(
         self,
@@ -222,14 +246,18 @@ class BookingRedirectService:
         outbound_date: Optional[str] = None,
         return_date: Optional[str] = None
     ) -> str:
-        """Build a direct Google Flights search URL as fallback."""
+        """Build a direct Google Flights search URL as fallback.
+        
+        Uses the query-parameter format which is more reliable than the path-based format.
+        Example: https://www.google.com/travel/flights?q=flights+from+HKG+to+NRT+on+2026-03-01
+        """
         base = "https://www.google.com/travel/flights"
         if departure_id and arrival_id and outbound_date:
-            # Google Flights URL format: /flights/DEP-ARR/2026-02-28
-            path = f"/flights/{departure_id}-{arrival_id}/{outbound_date}"
+            query_parts = [f"flights from {departure_id} to {arrival_id} on {outbound_date}"]
             if return_date:
-                path += f"/{return_date}"
-            return base + path
+                query_parts.append(f"return {return_date}")
+            query = " ".join(query_parts)
+            return f"{base}?q={query.replace(' ', '+')}"
         return base
     
     def find_booking_option(

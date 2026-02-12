@@ -269,22 +269,23 @@ class GeminiService:
         today = datetime.now()
         
         # --- Airport/City code mapping ---
+        # Use CITY codes for multi-airport cities so all airports are searched
         CITY_CODES = {
             # English
             "hong kong": "HKG", "hongkong": "HKG", "hkg": "HKG",
-            "tokyo": "NRT", "narita": "NRT", "haneda": "HND", "nrt": "NRT", "hnd": "HND",
-            "osaka": "KIX", "kix": "KIX",
-            "seoul": "ICN", "incheon": "ICN", "icn": "ICN",
+            "tokyo": "TYO", "narita": "NRT", "haneda": "HND", "nrt": "NRT", "hnd": "HND", "tyo": "TYO",
+            "osaka": "OSA", "kansai": "KIX", "itami": "ITM", "kix": "KIX", "osa": "OSA",
+            "seoul": "SEL", "incheon": "ICN", "gimpo": "GMP", "icn": "ICN", "sel": "SEL",
             "singapore": "SIN", "sin": "SIN",
             "bangkok": "BKK", "bkk": "BKK",
             "taipei": "TPE", "tpe": "TPE",
-            "shanghai": "PVG", "pvg": "PVG",
+            "shanghai": "PVG", "pvg": "PVG", "sha": "SHA",
             "beijing": "PEK", "pek": "PEK",
-            "new york": "JFK", "nyc": "JFK", "jfk": "JFK",
+            "new york": "NYC", "nyc": "NYC", "jfk": "JFK",
             "los angeles": "LAX", "la": "LAX", "lax": "LAX",
             "san francisco": "SFO", "sf": "SFO", "sfo": "SFO",
-            "london": "LHR", "lhr": "LHR",
-            "paris": "CDG", "cdg": "CDG",
+            "london": "LON", "lhr": "LHR", "lon": "LON",
+            "paris": "PAR", "cdg": "CDG", "par": "PAR",
             "dubai": "DXB", "dxb": "DXB",
             "sydney": "SYD", "syd": "SYD",
             "melbourne": "MEL", "mel": "MEL",
@@ -298,14 +299,15 @@ class GeminiService:
             "vancouver": "YVR", "yvr": "YVR",
             "madrid": "MAD", "mad": "MAD",
             "barcelona": "BCN", "bcn": "BCN",
-            "rome": "FCO", "fco": "FCO",
+            "rome": "ROM", "fco": "FCO", "rom": "ROM",
+            "chicago": "CHI", "ord": "ORD", "chi": "CHI",
             # Chinese
-            "香港": "HKG", "东京": "NRT", "大阪": "KIX", "首尔": "ICN",
+            "香港": "HKG", "东京": "TYO", "大阪": "OSA", "首尔": "SEL",
             "新加坡": "SIN", "曼谷": "BKK", "台北": "TPE",
             "上海": "PVG", "北京": "PEK", "广州": "CAN", "深圳": "SZX",
             "成都": "CTU", "杭州": "HGH", "武汉": "WUH", "西安": "XIY",
-            "南京": "NKG", "重庆": "CKG", "纽约": "JFK", "伦敦": "LHR",
-            "巴黎": "CDG", "悉尼": "SYD", "迪拜": "DXB", "吉隆坡": "KUL",
+            "南京": "NKG", "重庆": "CKG", "纽约": "NYC", "伦敦": "LON",
+            "巴黎": "PAR", "悉尼": "SYD", "迪拜": "DXB", "吉隆坡": "KUL",
         }
         
         # Reverse: code → city name

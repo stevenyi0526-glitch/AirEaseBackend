@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     # Google Places API
     google_places_api_key: str = ""
     
+    # AeroDataBox (RapidAPI) - Aircraft data enrichment
+    aerodatabox_rapidapi_key: str = ""
+    
     # PostgreSQL Database
     postgres_host: str = "localhost"
     postgres_port: int = 5432

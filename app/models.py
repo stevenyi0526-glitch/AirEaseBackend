@@ -119,6 +119,7 @@ class Flight(BaseModel):
 
 class ScoreDimensions(BaseModel):
     """评分维度"""
+    safety: float = Field(default=10.0, ge=0, le=10)  # NTSB safety records (10 = no records)
     reliability: float = Field(ge=0, le=10)  # On-time performance score (from airline OTP data)
     comfort: float = Field(ge=0, le=10)
     service: float = Field(ge=0, le=10)

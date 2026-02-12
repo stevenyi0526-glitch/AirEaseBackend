@@ -3,15 +3,26 @@
 ## Overview
 This document summarizes the SerpAPI integration for fetching real flight data from Google Flights.
 
+## SerpAPI Engines Used
+
+| Engine | Purpose | Backend Endpoint |
+|--------|---------|------------------|
+| `google_flights` | Flight search with booking tokens | `/v1/flights/search` |
+| `google_flights_autocomplete` | Location/airport suggestions | `/v1/autocomplete/*` |
+| `google_flights` (price_insights) | Price analysis & trends | `/v1/price-insights/*` |
+
 ## Files Changed
 
 ### Backend
 1. **`.env`** - Added `SERPAPI_KEY` environment variable
 2. **`app/config.py`** - Added `serpapi_key` setting
-3. **`app/services/serpapi_service.py`** - NEW: SerpAPI flight service
-4. **`app/services/__init__.py`** - Added serpapi service export
-5. **`app/routes/flights.py`** - Updated to use SerpAPI with mock fallback
-6. **`app/models.py`** - Added new SerpAPI fields and user review placeholders
+3. **`app/services/serpapi_service.py`** - SerpAPI flight, autocomplete, and price insights services
+4. **`app/services/__init__.py`** - Added serpapi service exports
+5. **`app/routes/flights.py`** - Flight search with SerpAPI and mock fallback
+6. **`app/routes/autocomplete.py`** - NEW: Location/airport autocomplete API
+7. **`app/routes/price_insights.py`** - NEW: Price insights and date comparison API
+8. **`app/routes/booking.py`** - Booking redirect API
+9. **`app/models.py`** - All Pydantic models including new autocomplete and price insights
 
 ### Frontend
 1. **`src/api/types.ts`** - Added new SerpAPI data types
@@ -142,8 +153,119 @@ curl "https://serpapi.com/search?engine=google_flights&departure_id=HKG&arrival_
 cd backend
 python run.py
 
-# Test search
+# Test flight search
 curl "http://localhost:8000/v1/flights/search?from=HKG&to=NRT&date=2026-03-15"
+
+# Test autocomplete
+curl "http://localhost:8000/v1/autocomplete/locations?q=tokyo"
+curl "http://localhost:8000/v1/autocomplete/airports?q=new"
+
+# Test price insights
+curl "http://localhost:8000/v1/price-insights?from=HKG&to=NRT&outboundDate=2026-03-15"
+
+# Test date comparison
+curl "http://localhost:8000/v1/price-insights/compare?from=HKG&to=NRT&dates=2026-03-15,2026-03-16,2026-03-17"
+```
+
+---
+
+## NEW: Autocomplete API
+
+Get location suggestions as users type in the search box.
+
+### `GET /v1/autocomplete/locations`
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `q` | string | ✅ | Search query (e.g., "New York", "东京") |
+| `gl` | string | | Country code (default: "us") |
+| `hl` | string | | Language code (default: "en") |
+| `excludeRegions` | boolean | | Only return cities with airports |
+
+**Example Response:**
+```json
+{
+  "query": "tokyo",
+  "suggestions": [
+    {
+      "position": 1,
+      "name": "Tokyo, Japan",
+      "type": "city",
+      "airports": [
+        {"name": "Haneda Airport", "code": "HND", "distance": "11 mi"},
+        {"name": "Narita International Airport", "code": "NRT", "distance": "42 mi"}
+      ]
+    }
+  ]
+}
+```
+
+### `GET /v1/autocomplete/airports`
+
+Same as `/locations` with `excludeRegions=true` - only returns cities with airports.
+
+---
+
+## NEW: Price Insights API
+
+Get price analysis for flight routes.
+
+### `GET /v1/price-insights`
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | string | ✅ | Departure airport IATA code |
+| `to` | string | ✅ | Arrival airport IATA code |
+| `outboundDate` | string | ✅ | Departure date (YYYY-MM-DD) |
+| `returnDate` | string | | Return date (YYYY-MM-DD) |
+| `currency` | string | | Currency code (default: "USD") |
+
+**Example Response:**
+```json
+{
+  "route": {"departure": "HKG", "arrival": "NRT", "outboundDate": "2026-03-15"},
+  "insights": {
+    "lowestPrice": 113,
+    "priceLevel": "typical",
+    "priceLevelDescription": "Prices are typical for this route",
+    "typicalPriceRange": {"low": 110, "high": 190},
+    "priceHistory": [{"date": "2026-01-15", "price": 108}, ...]
+  },
+  "currency": "USD"
+}
+```
+
+**Price Levels:**
+- `low` - Prices are lower than usual, good time to buy
+- `typical` - Normal prices for this route
+- `high` - Prices are higher than usual
+
+### `GET /v1/price-insights/compare`
+
+Compare prices across multiple dates.
+
+**Parameters:**
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `from` | string | ✅ | Departure airport |
+| `to` | string | ✅ | Arrival airport |
+| `dates` | string | ✅ | Comma-separated dates (max 5) |
+
+**Example Response:**
+```json
+{
+  "dateComparison": [
+    {"date": "2026-03-15", "lowestPrice": 113, "priceLevel": "typical"},
+    {"date": "2026-03-16", "lowestPrice": 98, "priceLevel": "low"}
+  ],
+  "recommendation": {
+    "bestDate": "2026-03-16",
+    "lowestPrice": 98,
+    "savings": 15
+  }
+}
 ```
 
 ---
@@ -156,14 +278,28 @@ curl "http://localhost:8000/v1/flights/search?from=HKG&to=NRT&date=2026-03-15"
 4. **Booking Integration**: Do you want to implement direct booking or just redirect to Google Flights?
 5. **Caching Strategy**: Should we cache SerpAPI results? If so, for how long?
 
+
 ---
 
 ## Next Steps
 
-1. [ ] Test the SerpAPI integration with your API key
-2. [ ] Design and implement user reviews database schema
-3. [ ] Create API routes for user reviews
-4. [ ] Add airline safety database
-5. [ ] Update UI components to display new data (carbon emissions, amenities badges, etc.)
-6. [ ] Implement booking URL generation
-7. [ ] Add price insights visualization
+1. [x] Test the SerpAPI integration with your API key
+2. [x] Implement autocomplete API for search box suggestions
+3. [x] Implement price insights API for price analysis
+4. [x] Implement booking redirect API
+5. [ ] Design and implement user reviews database schema
+6. [ ] Create API routes for user reviews
+7. [ ] Add airline safety database
+8. [ ] Update UI components to display new data (carbon emissions, amenities badges, etc.)
+9. [ ] Integrate autocomplete into search input components
+10. [ ] Add price insights visualization to frontend
+
+---
+
+## SerpAPI Documentation Links
+
+- [Google Flights API](https://serpapi.com/google-flights-api)
+- [Google Flights Autocomplete API](https://serpapi.com/google-flights-autocomplete-api)
+- [Google Flights Price Insights](https://serpapi.com/google-flights-price-insights)
+- [Google Flights Booking Options](https://serpapi.com/google-flights-booking-options)
+

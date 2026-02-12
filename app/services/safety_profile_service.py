@@ -13,8 +13,40 @@ import logging
 from sqlalchemy import text
 from app.database import SessionLocal
 from app.services.aircraft_db_service import AircraftDatabaseService
+from app.services.aerodatabox_service import enrich_aircraft as aerodatabox_enrich
 
 logger = logging.getLogger(__name__)
+
+
+def _infer_engine_type_from_string(engine_str: Optional[str]) -> Optional[str]:
+    """
+    Infer engine type ('Jet', 'Turboprop', 'Piston') from the engine string.
+    Known jet engine families help us correct wrong AeroDataBox data.
+    """
+    if not engine_str:
+        return None
+
+    upper = engine_str.upper()
+
+    # Known JET engine families/keywords
+    JET_KEYWORDS = [
+        "TRENT", "GE90", "GENX", "GE9X", "CF6", "CF34", "CFM", "LEAP",
+        "PW4000", "PW1000", "PW1100", "PW1500", "PW2000", "JT8D", "JT9D",
+        "V2500", "GP7200", "RB211",
+        "TURBOFAN",
+    ]
+    for kw in JET_KEYWORDS:
+        if kw in upper:
+            return "Jet"
+
+    # Known TURBOPROP engine families
+    TP_KEYWORDS = ["PW100", "PW150", "PT6", "CT7", "PW120", "PW127", "TPE331", "TURBOPROP"]
+    for kw in TP_KEYWORDS:
+        if kw in upper:
+            return "Turboprop"
+
+    return None
+
 
 # ============================================================
 # 1. FlightRadar24 Resolver
@@ -246,6 +278,112 @@ def get_model_accidents(model: str) -> int:
         db.close()
 
 
+def get_incidents_paginated(
+    query_type: str,
+    query_value: str,
+    page: int = 1,
+    per_page: int = 10,
+) -> Dict[str, Any]:
+    """
+    Return paginated NTSB incident records with narratives.
+    
+    query_type: 'tail' | 'airline' | 'model'
+    query_value: the tail number, airline name, or model name
+    """
+    if not query_value:
+        return {"records": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+
+    db = SessionLocal()
+    try:
+        # Build WHERE clause based on query_type
+        if query_type == "tail":
+            where_clause = "UPPER(TRIM(a.reg_no)) = UPPER(TRIM(:val))"
+            params = {"val": query_value.strip()}
+        elif query_type == "airline":
+            where_clause = "a.oper_name ILIKE :val"
+            cutoff_year = datetime.now().year - 10
+            where_clause += " AND ev.ev_date >= :cutoff"
+            params = {"val": f"%{query_value.strip()}%", "cutoff": f"{cutoff_year}-01-01"}
+        elif query_type == "model":
+            where_clause = "a.model ILIKE :val"
+            params = {"val": f"%{query_value.strip()}%"}
+        else:
+            return {"records": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+
+        # Count total
+        count_row = db.execute(
+            text(f"""
+                SELECT COUNT(DISTINCT ev.ev_id)
+                FROM events ev
+                JOIN aircraft a ON ev.ev_id = a.ev_id
+                WHERE {where_clause}
+            """),
+            params,
+        ).fetchone()
+        total = count_row[0] if count_row else 0
+        total_pages = max(1, (total + per_page - 1) // per_page)
+
+        # Fetch page
+        offset = (page - 1) * per_page
+        page_params = {**params, "limit": per_page, "offset": offset}
+        rows = db.execute(
+            text(f"""
+                SELECT DISTINCT ON (ev.ev_id)
+                    ev.ev_id,
+                    ev.ev_date,
+                    ev.ev_city,
+                    ev.ev_state,
+                    ev.ev_country,
+                    ev.injury_severity,
+                    a.model,
+                    a.oper_name,
+                    a.reg_no,
+                    n.narr_cause,
+                    n.narr_acc_desc
+                FROM events ev
+                JOIN aircraft a ON ev.ev_id = a.ev_id
+                LEFT JOIN narratives n ON ev.ev_id = n.ev_id
+                WHERE {where_clause}
+                ORDER BY ev.ev_id, ev.ev_date DESC
+            """),
+            params,
+        ).fetchall()
+
+        # Sort by date descending in Python, then paginate
+        # (DISTINCT ON requires ORDER BY ev.ev_id first, so we sort afterwards)
+        sorted_rows = sorted(rows, key=lambda r: r[1] or datetime.min, reverse=True)
+        paged_rows = sorted_rows[offset:offset + per_page]
+
+        records = []
+        for r in paged_rows:
+            records.append({
+                "ev_id": r[0],
+                "date": r[1].strftime("%Y-%m-%d") if r[1] else None,
+                "city": r[2],
+                "state": r[3],
+                "country": r[4],
+                "injury_severity": r[5],
+                "model": r[6],
+                "operator": r[7],
+                "registration": r[8],
+                "cause": r[9],
+                "description": r[10],
+            })
+
+        return {
+            "records": records,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "total_pages": total_pages,
+        }
+    except Exception as e:
+        logger.error(f"get_incidents_paginated error ({query_type}={query_value}): {e}")
+        return {"records": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+    finally:
+        db.close()
+
+
 # ============================================================
 # 3. Orchestrator – Build Full Safety Profile
 # ============================================================
@@ -302,14 +440,24 @@ def build_safety_profile(
         opensky_info = AircraftDatabaseService.lookup_by_registration(tail_number)
     if not opensky_info and model:
         opensky_info = AircraftDatabaseService.lookup_by_model_name(model, airline_iata)
+    
+    # If registration lookup returned no engine data, also try typecode for engine
+    opensky_typecode_info: Optional[Dict[str, Any]] = None
+    if opensky_info and not opensky_info.get("engines") and opensky_info.get("typecode"):
+        opensky_typecode_info = AircraftDatabaseService.lookup_by_typecode(
+            opensky_info["typecode"], airline_iata
+        )
 
     if opensky_info:
         # Fill engine from OpenSky if NTSB didn't have it
-        if not engine_str and opensky_info.get("engines"):
-            engine_str = opensky_info["engines"]
-            if opensky_info.get("engineType"):
-                engine_str += f" ({opensky_info['engineType']})"
-            eng_type = opensky_info.get("engineType") or eng_type
+        if not engine_str:
+            # Prefer typecode engine (more specific, e.g. "RR Trent XWB") over registration
+            engine_source = opensky_typecode_info if opensky_typecode_info and opensky_typecode_info.get("engines") else opensky_info
+            if engine_source.get("engines"):
+                engine_str = engine_source["engines"]
+                if engine_source.get("engineType"):
+                    engine_str += f" ({engine_source['engineType']})"
+                eng_type = engine_source.get("engineType") or eng_type
         # Fill age from OpenSky
         built_year = opensky_info.get("builtYear")
         age_years = opensky_info.get("aircraftAge")
@@ -320,15 +468,69 @@ def build_safety_profile(
         if not resolved_model:
             resolved_model = opensky_info.get("model")
 
-    # --- Step 4: Accident queries ---
+    # --- Step 4: AeroDataBox API fallback (engine, age, image) ---
+    image_url: Optional[str] = None
+    image_attribution: Optional[str] = None
+    adb_info: Optional[Dict[str, Any]] = None
+    num_seats: Optional[int] = None
+
+    # Determine the best registration to use for AeroDataBox
+    adb_reg = tail_number
+    if not adb_reg and opensky_info and opensky_info.get("registration"):
+        adb_reg = opensky_info["registration"]
+
+    # Only call AeroDataBox if we still lack engine OR age data
+    needs_engine = not engine_str
+    needs_age = age_years is None
+    needs_eng_type = not eng_type
+    if (needs_engine or needs_age or needs_eng_type) and adb_reg:
+        adb_info = aerodatabox_enrich(adb_reg)
+    elif adb_reg:
+        # Even if we have engine+age, still try to get image from cache (no API call)
+        adb_info = aerodatabox_enrich(adb_reg)
+
+    if adb_info:
+        if not engine_str and adb_info.get("engineStr"):
+            engine_str = adb_info["engineStr"]
+            eng_type = adb_info.get("engineType") or eng_type
+        if not eng_type and adb_info.get("engineType"):
+            eng_type = adb_info["engineType"]
+        if age_years is None and adb_info.get("ageYears") is not None:
+            age_years = round(adb_info["ageYears"], 1)
+            age_label = adb_info.get("ageLabel")
+        if built_year is None and adb_info.get("builtYear"):
+            built_year = adb_info["builtYear"]
+        if not resolved_model and adb_info.get("typeName"):
+            resolved_model = adb_info["typeName"]
+        if adb_info.get("numSeats"):
+            num_seats = adb_info["numSeats"]
+        image_url = adb_info.get("imageUrl")
+        image_attribution = adb_info.get("imageAttribution")
+
+    # --- Step 4b: Cross-validate engine type ---
+    # If we have a concrete engine string (e.g. "RR Trent XWB"), use it to
+    # infer the correct engine type — this overrides potentially wrong
+    # AeroDataBox data (e.g. "Turboprop" for an A350).
+    inferred = _infer_engine_type_from_string(engine_str)
+    if inferred and eng_type and inferred != eng_type:
+        logger.info(f"🔧 Engine type override: '{eng_type}' → '{inferred}' (inferred from engine string '{engine_str}')")
+        eng_type = inferred
+    elif inferred and not eng_type:
+        eng_type = inferred
+
+    # --- Step 5: Accident queries ---
     plane_accidents = get_plane_accidents(tail_number) if tail_number else None
     airline_total = get_airline_accidents(resolved_airline, years=10) if resolved_airline else 0
     model_total = get_model_accidents(resolved_model) if resolved_model else 0
 
-    # --- Step 5: Build response ---
+    # --- Step 6: Build response ---
     full_model_name = None
     if resolved_mfr and resolved_model:
-        full_model_name = f"{resolved_mfr} {resolved_model}"
+        # Avoid duplication like "Boeing Boeing 787" when model already contains manufacturer
+        if resolved_model.upper().startswith(resolved_mfr.upper()):
+            full_model_name = resolved_model
+        else:
+            full_model_name = f"{resolved_mfr} {resolved_model}"
     elif resolved_model:
         full_model_name = resolved_model
 
@@ -338,9 +540,11 @@ def build_safety_profile(
             "tail_number": tail_number,
             "airline": resolved_airline,
             "model": full_model_name or model,
+            "model_query": resolved_model or model,
             "built_year": built_year,
             "age_years": age_years,
             "age_label": age_label,
+            "num_seats": num_seats,
         },
         "technical_specs": {
             "engine": engine_str,
@@ -353,6 +557,10 @@ def build_safety_profile(
             "airline_total_accidents": airline_total,
             "model_total_accidents": model_total,
         },
+        "aircraft_image": {
+            "url": image_url,
+            "attribution": image_attribution,
+        } if image_url else None,
     }
 
 

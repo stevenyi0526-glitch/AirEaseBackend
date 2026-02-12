@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from app.services.aircraft_db_service import AircraftDatabaseService
-from app.services.safety_profile_service import build_safety_profile
+from app.services.safety_profile_service import build_safety_profile, get_incidents_paginated
 from app.routes.auth import require_auth
 from app.database import UserDB
 
@@ -146,3 +146,31 @@ async def get_safety_profile(
         model=model,
     )
     return profile
+
+
+# ============================================================
+# Incident Records endpoint (paginated NTSB narratives)
+# ============================================================
+
+
+@router.get("/incidents")
+async def get_incidents(
+    query_type: str = Query(..., description="Type of query: 'tail', 'airline', or 'model'"),
+    query_value: str = Query(..., description="The tail number, airline name, or model name"),
+    page: int = Query(1, ge=1, description="Page number (1-indexed)"),
+    per_page: int = Query(10, ge=1, le=50, description="Records per page"),
+):
+    """
+    Get paginated NTSB incident records with narratives.
+
+    - query_type=tail → incidents for a specific aircraft by registration
+    - query_type=airline → incidents for an airline (last 10 years)
+    - query_type=model → incidents for an aircraft model (all time)
+    """
+    result = get_incidents_paginated(
+        query_type=query_type,
+        query_value=query_value,
+        page=page,
+        per_page=per_page,
+    )
+    return result

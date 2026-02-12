@@ -219,10 +219,65 @@ def get_plane_accidents(reg_no: str) -> List[Dict[str, Any]]:
         db.close()
 
 
+# ── Airline name → NTSB operator name mapping ──
+# Short/brand names that would cause false-positive substring matches.
+# Maps to a list of known NTSB oper_name patterns.
+_AIRLINE_NAME_EXPANSIONS: Dict[str, List[str]] = {
+    "ANA":          ["All Nippon%", "ANA%"],
+    "JAL":          ["Japan Air%", "JAL%"],
+    "SIA":          ["Singapore Airlines%"],
+    "CX":           ["Cathay Pacific%"],
+    "QF":           ["Qantas%"],
+    "BA":           ["British Airways%"],
+    "AF":           ["Air France%"],
+    "LH":           ["Lufthansa%", "Deutsche Lufthansa%"],
+    "KE":           ["Korean Air%"],
+    "OZ":           ["Asiana%"],
+    "TK":           ["Turkish Airlines%", "Turk Hava Yollari%"],
+    "EK":           ["Emirates%"],
+    "QR":           ["Qatar Airways%"],
+    "SQ":           ["Singapore Airlines%"],
+    "EVA":          ["EVA Air%"],
+    "CI":           ["China Airlines%"],
+}
+
+
+def _airline_where_clause(airline_name: str) -> tuple:
+    """
+    Build a SQL WHERE clause + params for airline matching.
+    Uses exact-prefix or known expansions for short names to avoid
+    false positives (e.g. 'ANA' matching 'Ryanair').
+    
+    Returns (where_sql, params_dict).
+    """
+    name = airline_name.strip()
+    upper = name.upper()
+
+    # Check if we have a known expansion for this airline name
+    if upper in _AIRLINE_NAME_EXPANSIONS:
+        patterns = _AIRLINE_NAME_EXPANSIONS[upper]
+        conditions = []
+        params = {}
+        for i, pat in enumerate(patterns):
+            key = f"airline_{i}"
+            conditions.append(f"a.oper_name ILIKE :{key}")
+            params[key] = pat
+        return " OR ".join(conditions), params
+
+    # For longer names (>=5 chars), substring match is usually safe
+    if len(name) >= 5:
+        return "a.oper_name ILIKE :airline_0", {"airline_0": f"%{name}%"}
+
+    # For short names (<5 chars), use word-boundary matching via regex
+    # This ensures 'ANA' matches 'ANA' or 'ANA Wings' but not 'Ryanair'
+    return "a.oper_name ~* :airline_0", {"airline_0": f"(^|\\W){name}($|\\W)"}
+
+
 def get_airline_accidents(operator_name: str, years: int = 10) -> int:
     """
     Count NTSB events for a given operator (airline) in the last *years* years.
-    Uses ILIKE for fuzzy matching on oper_name.
+    Uses word-boundary-aware matching to avoid false positives
+    (e.g. 'ANA' should not match 'Ryanair' or 'Air Canada').
     """
     if not operator_name:
         return 0
@@ -230,18 +285,17 @@ def get_airline_accidents(operator_name: str, years: int = 10) -> int:
     db = SessionLocal()
     try:
         cutoff_year = datetime.now().year - years
+        where, params = _airline_where_clause(operator_name.strip())
+        params["cutoff"] = f"{cutoff_year}-01-01"
         row = db.execute(
-            text("""
+            text(f"""
                 SELECT COUNT(DISTINCT ev.ev_id)
                 FROM events ev
                 JOIN aircraft a ON ev.ev_id = a.ev_id
-                WHERE a.oper_name ILIKE :op
+                WHERE ({where})
                   AND ev.ev_date >= :cutoff
             """),
-            {
-                "op": f"%{operator_name.strip()}%",
-                "cutoff": f"{cutoff_year}-01-01",
-            },
+            params,
         ).fetchone()
         return row[0] if row else 0
     except Exception as e:
@@ -300,10 +354,10 @@ def get_incidents_paginated(
             where_clause = "UPPER(TRIM(a.reg_no)) = UPPER(TRIM(:val))"
             params = {"val": query_value.strip()}
         elif query_type == "airline":
-            where_clause = "a.oper_name ILIKE :val"
+            airline_where, params = _airline_where_clause(query_value.strip())
             cutoff_year = datetime.now().year - 10
-            where_clause += " AND ev.ev_date >= :cutoff"
-            params = {"val": f"%{query_value.strip()}%", "cutoff": f"{cutoff_year}-01-01"}
+            where_clause = f"({airline_where}) AND ev.ev_date >= :cutoff"
+            params["cutoff"] = f"{cutoff_year}-01-01"
         elif query_type == "model":
             where_clause = "a.model ILIKE :val"
             params = {"val": f"%{query_value.strip()}%"}

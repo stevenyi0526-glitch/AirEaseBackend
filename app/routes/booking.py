@@ -3,10 +3,11 @@ AirEase Backend - Booking Redirect Routes
 Handles flight booking redirects to airline websites
 """
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
-from typing import Optional
+from typing import Optional, List
 import httpx
+from urllib.parse import urlencode
 
 from app.services.booking_redirect_service import booking_redirect_service
 from app.config import settings
@@ -323,4 +324,204 @@ async def get_booking_options(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to fetch booking options: {str(e)}"
+        )
+
+
+@router.get(
+    "/booking-links",
+    summary="Get all booking platform links for a flight",
+    description="Returns structured booking links for all available platforms, for use in the frontend hover menu."
+)
+async def get_booking_links(
+    request: Request,
+    booking_token: str = Query(
+        ...,
+        description="Booking token from flight search results"
+    ),
+    departure_id: Optional[str] = Query(None, description="Departure airport IATA code"),
+    arrival_id: Optional[str] = Query(None, description="Arrival airport IATA code"),
+    outbound_date: Optional[str] = Query(None, description="Outbound date YYYY-MM-DD"),
+    return_date: Optional[str] = Query(None, description="Return date YYYY-MM-DD"),
+    airline_name: Optional[str] = Query(None, description="Airline name for labelling"),
+):
+    """
+    Returns a list of booking platforms with redirect URLs.
+
+    Each item has:
+    - **name**: Platform display name (e.g., "Expedia", "Trip.com", "Japan Airlines")
+    - **url**: Redirect URL through our /v1/booking/redirect endpoint
+    - **price**: Price on that platform (if available)
+    - **isAirline**: Whether this is the airline's official site
+    - **logoHint**: Lowercase brand name for icon matching
+    """
+    if not settings.serpapi_key:
+        raise HTTPException(status_code=500, detail="Booking service not configured")
+
+    try:
+        serpapi_response = await booking_redirect_service.get_booking_options(
+            booking_token=booking_token,
+            departure_id=departure_id,
+            arrival_id=arrival_id,
+            outbound_date=outbound_date,
+            return_date=return_date,
+        )
+
+        booking_options = serpapi_response.get("booking_options", [])
+        print(f"📋 booking-links: SerpAPI returned {len(booking_options)} booking_options")
+        for i, opt in enumerate(booking_options):
+            t = opt.get("together", {})
+            print(f"   [{i}] book_with={t.get('book_with','?')}, airline={t.get('airline',False)}, price={t.get('price')}")
+        if not booking_options:
+            return {"links": []}
+
+        # Build the base redirect URL using the request's origin
+        # This ensures it works behind proxies / ngrok / production
+        base_url = str(request.base_url).rstrip("/")
+
+        links = []
+        seen_names = set()
+        for idx, option in enumerate(booking_options):
+            together = option.get("together", {})
+            book_with = together.get("book_with", "").strip()
+            is_airline = together.get("airline", False)
+
+            # Some options use separate_tickets with departing/returning instead of together
+            if not book_with and option.get("separate_tickets"):
+                departing = option.get("departing", {})
+                book_with = departing.get("book_with", "").strip()
+                is_airline = departing.get("airline", False)
+
+            if not book_with or book_with in seen_names:
+                continue
+            seen_names.add(book_with)
+            price = together.get("price")
+
+            # Build a redirect URL that selects this specific option by index
+            redirect_params = {
+                "booking_token": booking_token,
+                "option_index": str(idx),
+            }
+            if departure_id:
+                redirect_params["departure_id"] = departure_id
+            if arrival_id:
+                redirect_params["arrival_id"] = arrival_id
+            if outbound_date:
+                redirect_params["outbound_date"] = outbound_date
+            if return_date:
+                redirect_params["return_date"] = return_date
+
+            redirect_url = f"{base_url}/v1/booking/redirect-by-index?{urlencode(redirect_params)}"
+
+            links.append({
+                "name": book_with,
+                "url": redirect_url,
+                "price": price,
+                "isAirline": is_airline,
+                "logoHint": book_with.lower().split()[0],  # first word lowercase
+            })
+
+        return {"links": links}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch booking links: {str(e)}")
+
+
+@router.get(
+    "/redirect-by-index",
+    response_class=HTMLResponse,
+    summary="Redirect to a specific booking option by index",
+)
+async def redirect_by_index(
+    booking_token: str = Query(..., description="Booking token"),
+    option_index: int = Query(..., description="Index of the booking option to use"),
+    departure_id: Optional[str] = Query(None),
+    arrival_id: Optional[str] = Query(None),
+    outbound_date: Optional[str] = Query(None),
+    return_date: Optional[str] = Query(None),
+):
+    """Redirect to a specific booking platform by its index in booking_options."""
+    if not settings.serpapi_key:
+        return HTMLResponse(
+            content=booking_redirect_service.generate_error_html(
+                "Booking service not configured", ""
+            ),
+            status_code=500,
+        )
+
+    try:
+        serpapi_response = await booking_redirect_service.get_booking_options(
+            booking_token=booking_token,
+            departure_id=departure_id,
+            arrival_id=arrival_id,
+            outbound_date=outbound_date,
+            return_date=return_date,
+        )
+
+        booking_options = serpapi_response.get("booking_options", [])
+
+        if not booking_options:
+            google_flights_url = serpapi_response.get("_google_flights_url")
+            if google_flights_url:
+                return HTMLResponse(
+                    content=booking_redirect_service.generate_google_flights_fallback_html(google_flights_url),
+                    status_code=200,
+                )
+            return HTMLResponse(
+                content=booking_redirect_service.generate_error_html(
+                    "No booking options available",
+                    "This flight may no longer be available.",
+                ),
+                status_code=200,
+            )
+
+        # Clamp index
+        idx = min(option_index, len(booking_options) - 1)
+        selected_option = booking_options[idx]
+
+        together = selected_option.get("together", {})
+
+        # Phone-only?
+        booking_phone = together.get("booking_phone")
+        if booking_phone and not together.get("booking_request"):
+            return HTMLResponse(
+                content=booking_redirect_service.generate_phone_booking_html(
+                    airline_name=together.get("book_with", "Airline"),
+                    phone_number=booking_phone,
+                    price=together.get("price"),
+                    fee=together.get("estimated_phone_service_fee"),
+                ),
+                status_code=200,
+            )
+
+        booking_details = booking_redirect_service.extract_booking_request(
+            booking_option=selected_option,
+        )
+
+        if not booking_details:
+            return HTMLResponse(
+                content=booking_redirect_service.generate_error_html(
+                    "Booking redirect not available",
+                    "This option does not support online redirect.",
+                ),
+                status_code=200,
+            )
+
+        url, post_data = booking_details
+        return HTMLResponse(
+            content=booking_redirect_service.generate_redirect_html(
+                url=url,
+                post_data=post_data,
+                airline_name=together.get("book_with", "Airline"),
+                price=together.get("price"),
+            ),
+            status_code=200,
+        )
+
+    except Exception as e:
+        print(f"❌ redirect-by-index error: {e}")
+        return HTMLResponse(
+            content=booking_redirect_service.generate_error_html("An error occurred", str(e)),
+            status_code=200,
         )

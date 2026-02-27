@@ -142,9 +142,32 @@ class BookingRedirectService:
         #   - outbound_date (required when departure_id is set)
         #
         # Strategy:
-        #   1. Try type=2 (one-way) with departure_id + outbound_date — works for most tokens
-        #   2. If return_date provided, also try type=1 (round-trip)
-        #   3. Fallback: redirect to Google Flights search URL
+        #   - Detect if the booking token encodes multiple legs (combined round-trip token)
+        #   - If so, try round-trip FIRST to get proper round-trip booking links
+        #   - Otherwise, try one-way first (most common for individual flight booking)
+        #   - Fallback: redirect to Google Flights search URL
+        
+        # Detect if this is a combined round-trip token by decoding it
+        is_combined_token = False
+        token_return_date = None
+        try:
+            import base64, json
+            decoded = base64.b64decode(booking_token).decode('utf-8')
+            parsed = json.loads(decoded)
+            # Combined tokens have 3 elements: [serpapi_blob, [[leg1]], [[leg2]]]
+            if isinstance(parsed, list) and len(parsed) >= 3:
+                is_combined_token = True
+                # Extract return date from the second leg if not provided
+                try:
+                    token_return_date = parsed[2][0][1]  # e.g. "2026-02-27"
+                    print(f"🔗 Booking: Detected combined round-trip token ({len(parsed)-1} legs), return_date from token: {token_return_date}")
+                except (IndexError, TypeError):
+                    print(f"🔗 Booking: Detected combined round-trip token ({len(parsed)-1} legs)")
+        except Exception:
+            pass
+        
+        # Use token's return date if not provided via URL parameter
+        effective_return_date = return_date or token_return_date
         
         base_params = {
             "engine": "google_flights",
@@ -155,10 +178,10 @@ class BookingRedirectService:
             "currency": currency,
         }
         
-        # Build attempts list — try one-way first (most common for individual flight booking)
+        # Build attempts list — order depends on whether token is combined
         attempts = []
         
-        # Attempt 1: One-way with route context (most reliable)
+        # One-way params
         oneway_params = {**base_params, "type": "2"}
         if departure_id:
             oneway_params["departure_id"] = departure_id
@@ -166,10 +189,10 @@ class BookingRedirectService:
             oneway_params["arrival_id"] = arrival_id
         if outbound_date:
             oneway_params["outbound_date"] = outbound_date
-        attempts.append(("one-way", oneway_params))
         
-        # Attempt 2: If return_date provided, try round-trip
-        if return_date:
+        # Round-trip params
+        roundtrip_params = None
+        if effective_return_date:
             roundtrip_params = {
                 **base_params,
                 "type": "1",
@@ -180,8 +203,18 @@ class BookingRedirectService:
                 roundtrip_params["arrival_id"] = arrival_id
             if outbound_date:
                 roundtrip_params["outbound_date"] = outbound_date
-            roundtrip_params["return_date"] = return_date
+            roundtrip_params["return_date"] = effective_return_date
+        
+        # Order attempts based on token type
+        if is_combined_token and roundtrip_params:
+            # Combined token = try round-trip FIRST to get proper round-trip booking links
             attempts.append(("round-trip", roundtrip_params))
+            attempts.append(("one-way", oneway_params))
+        else:
+            # Single-leg token = try one-way first
+            attempts.append(("one-way", oneway_params))
+            if roundtrip_params:
+                attempts.append(("round-trip", roundtrip_params))
         
         data = None
         async with httpx.AsyncClient(timeout=60.0) as client:
@@ -275,14 +308,17 @@ class BookingRedirectService:
           3. Expedia if available
           4. Fall back to first available option
         
-        Priority when prefer_expedia=True (different airlines / aggregator):
-          1. Expedia if available
-          2. Fall back to first available option
+        Priority when prefer_expedia=True (different airlines / mixed booking):
+          1. Use the 2nd booking option (index 1) — typically a 3rd-party
+             aggregator (Expedia, Trip.com, Kiwi, etc.) that supports
+             mixed-airline bookings, since the 1st option is usually the
+             airline's official site which may only contain one leg.
+          2. Fall back to 1st option if only one option exists
         
         Args:
             booking_options: List of booking options from SerpAPI
             airline_name: Optional airline name to match (e.g., "ANA", "Delta")
-            prefer_expedia: If True, skip airline matching and prefer Expedia
+            prefer_expedia: If True, prefer 3rd-party aggregator (2nd option)
         
         Returns:
             The selected booking option, or None if not found
@@ -290,19 +326,12 @@ class BookingRedirectService:
         if not booking_options:
             return None
         
-        # Helper: check if option is Expedia
-        def _is_expedia(option: Dict[str, Any]) -> bool:
-            together = option.get("together", {})
-            book_with = together.get("book_with", "").lower()
-            return "expedia" in book_with
-        
         if prefer_expedia:
-            # AGGREGATOR MODE: prefer Expedia, else first option
-            for option in booking_options:
-                if _is_expedia(option):
-                    return option
-            # No Expedia found → fall back to first option
-            return booking_options[0] if booking_options else None
+            # MIXED-AIRLINE MODE: prefer 2nd option (3rd-party aggregator),
+            # fall back to 1st if only one option exists
+            if len(booking_options) >= 2:
+                return booking_options[1]
+            return booking_options[0]
         
         # AIRLINE MODE: try official airline first, then Expedia, then first
         
@@ -313,6 +342,11 @@ class BookingRedirectService:
             """Check if book_with matches any of the search name variations."""
             book_with_lower = book_with.lower()
             return any(name in book_with_lower for name in search_names)
+        
+        def _is_expedia(option: Dict[str, Any]) -> bool:
+            together = option.get("together", {})
+            book_with = together.get("book_with", "").lower()
+            return "expedia" in book_with
         
         # First priority: Official airline website matching the airline name
         if search_names:

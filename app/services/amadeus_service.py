@@ -4,8 +4,9 @@ AirEase Backend - Amadeus Flight API Service
 """
 
 import httpx
+import re
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 
 from app.config import settings
 from app.models import (
@@ -30,6 +31,9 @@ class AmadeusService:
         self.access_token: Optional[str] = None
         self.token_expires: Optional[datetime] = None
         self.client = httpx.AsyncClient(timeout=30.0)
+        # Cache for availability data: key = "origin-dest-date-cabin" -> (timestamp, data)
+        self._availability_cache: Dict[str, Tuple[datetime, Dict[str, int]]] = {}
+        self._cache_ttl = timedelta(minutes=30)
     
     async def _get_access_token(self) -> str:
         """获取OAuth2 Access Token"""
@@ -272,6 +276,147 @@ class AmadeusService:
             mealType="正餐"
         )
     
+    async def get_flight_availability(
+        self,
+        origin: str,
+        destination: str,
+        date: str,
+        cabin: str = "ECONOMY"
+    ) -> Dict[str, int]:
+        """
+        Fetch seat availability for ALL flights on a route in ONE API call.
+        
+        Uses Amadeus Flight Availabilities Search API:
+        POST /v1/shopping/availability/flight-availabilities
+        
+        Returns a dict mapping normalized flight keys to seat counts:
+          { "CX 888": 9, "BA 27": 4, ... }
+        
+        Results are cached for 30 minutes per route+date+cabin to conserve quota.
+        """
+        # Map cabin string to Amadeus cabin code
+        cabin_map = {
+            "economy": "ECONOMY",
+            "premium": "PREMIUM_ECONOMY",
+            "premium economy": "PREMIUM_ECONOMY",
+            "business": "BUSINESS",
+            "first": "FIRST",
+        }
+        travel_class = cabin_map.get(cabin.lower(), "ECONOMY")
+        
+        # Check cache
+        cache_key = f"{origin}-{destination}-{date}-{travel_class}"
+        if cache_key in self._availability_cache:
+            cached_time, cached_data = self._availability_cache[cache_key]
+            if datetime.now() - cached_time < self._cache_ttl:
+                print(f"[Amadeus Availability] Cache hit for {cache_key}")
+                return cached_data
+            else:
+                del self._availability_cache[cache_key]
+        
+        try:
+            token = await self._get_access_token()
+            
+            url = f"{self.base_url}/v1/shopping/availability/flight-availabilities"
+            
+            # Build the request body for batch availability
+            request_body = {
+                "originDestinations": [
+                    {
+                        "id": "1",
+                        "originLocationCode": origin.upper(),
+                        "destinationLocationCode": destination.upper(),
+                        "departureDateTime": {
+                            "date": date  # YYYY-MM-DD
+                        }
+                    }
+                ],
+                "travelers": [
+                    {
+                        "id": "1",
+                        "travelerType": "ADULT"
+                    }
+                ],
+                "sources": ["GDS"]
+            }
+            
+            print(f"[Amadeus Availability] Fetching for {origin}->{destination} on {date}, cabin={travel_class}")
+            
+            response = await self.client.post(
+                url,
+                json=request_body,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "X-HTTP-Method-Override": "GET",
+                    "Accept": "application/vnd.amadeus+json"
+                }
+            )
+            
+            if response.status_code != 200:
+                print(f"[Amadeus Availability] Error {response.status_code}: {response.text[:500]}")
+                return {}
+            
+            data = response.json()
+            
+            # Parse the response: extract seat counts per flight segment
+            # Map: "CARRIER NUMBER" -> min seats across all segments
+            availability_map: Dict[str, int] = {}
+            
+            for offer in data.get("data", []):
+                for segment in offer.get("segments", []):
+                    carrier = segment.get("carrierCode", "")
+                    number = segment.get("number", "")
+                    
+                    if not carrier or not number:
+                        continue
+                    
+                    # Normalize flight key to match SerpAPI format: "CX 888"
+                    flight_key = f"{carrier} {number}"
+                    
+                    # Find the max bookable seats for the target cabin class
+                    # Each segment has availabilityClasses with class codes and seat counts
+                    max_seats = 0
+                    for avail_class in segment.get("availabilityClasses", []):
+                        class_code = avail_class.get("class", "")
+                        num_seats = avail_class.get("numberOfBookableSeats", 0)
+                        
+                        # Map class codes to cabin categories
+                        # Economy: Y, B, H, K, L, M, N, Q, S, T, V, W, X, G, O, E
+                        # Premium Economy: W (sometimes), R
+                        # Business: J, C, D, I, Z
+                        # First: F, A, P
+                        is_match = False
+                        if travel_class == "ECONOMY":
+                            is_match = class_code in "YBHKLMNQSTVWXGOE"
+                        elif travel_class == "PREMIUM_ECONOMY":
+                            is_match = class_code in "WR"
+                        elif travel_class == "BUSINESS":
+                            is_match = class_code in "JCDIZ"
+                        elif travel_class == "FIRST":
+                            is_match = class_code in "FAP"
+                        
+                        if is_match and num_seats > max_seats:
+                            max_seats = num_seats
+                    
+                    if max_seats > 0:
+                        # If flight has multiple segments (connecting), use minimum
+                        if flight_key in availability_map:
+                            availability_map[flight_key] = min(availability_map[flight_key], max_seats)
+                        else:
+                            availability_map[flight_key] = max_seats
+            
+            print(f"[Amadeus Availability] Found availability for {len(availability_map)} flights")
+            
+            # Cache the results
+            self._availability_cache[cache_key] = (datetime.now(), availability_map)
+            
+            return availability_map
+            
+        except Exception as e:
+            print(f"[Amadeus Availability] Error: {e}")
+            return {}
+
     async def close(self):
         """关闭HTTP客户端"""
         await self.client.aclose()

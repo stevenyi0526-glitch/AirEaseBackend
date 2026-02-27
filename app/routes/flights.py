@@ -6,7 +6,7 @@ Supports both SerpAPI (real Google Flights data) and mock data fallback.
 """
 
 from fastapi import APIRouter, HTTPException, Query, Header
-from typing import Optional
+from typing import Optional, Dict
 import uuid
 
 from app.models import (
@@ -15,6 +15,7 @@ from app.models import (
 )
 from app.services.mock_service import mock_flight_service
 from app.services.serpapi_service import serpapi_flight_service, get_airport_code
+from app.services.amadeus_service import amadeus_service
 from app.services.auth_service import auth_service
 from app.config import settings
 
@@ -204,6 +205,45 @@ async def search_flights(
 
 
 @router.get(
+    "/availability",
+    response_model=Dict[str, int],
+    summary="获取航班座位余量",
+    description=(
+        "使用 Amadeus Flight Availabilities API 批量获取某条航线所有航班的剩余座位数。"
+        "一次 API 调用获取所有航班数据，结果缓存30分钟。"
+        "返回 { flightKey: seatsRemaining } 映射。"
+    )
+)
+async def get_flight_availability(
+    origin: str = Query(..., description="出发机场IATA代码 (如 HKG, NRT)"),
+    destination: str = Query(..., description="到达机场IATA代码"),
+    date: str = Query(..., description="出发日期 (YYYY-MM-DD)"),
+    cabin: str = Query("economy", description="舱位：economy/business/first"),
+):
+    """
+    Batch fetch seat availability for ALL flights on a route.
+    
+    Uses ONE Amadeus API call per route+date.
+    Results are cached for 30 minutes.
+    
+    Returns a mapping of flight keys to remaining seat counts:
+    { "CX 888": 9, "BA 27": 4 }
+    """
+    try:
+        availability = await amadeus_service.get_flight_availability(
+            origin=origin,
+            destination=destination,
+            date=date,
+            cabin=cabin
+        )
+        return availability
+    except Exception as e:
+        print(f"[Availability Endpoint] Error: {e}")
+        # Return empty dict on error - graceful degradation
+        return {}
+
+
+@router.get(
     "/search-roundtrip",
     response_model=RoundTripSearchResponse,
     summary="搜索往返航班",
@@ -345,8 +385,8 @@ async def get_return_flights(
         is_authenticated = False
         if authorization and authorization.startswith("Bearer "):
             token = authorization.split(" ")[1]
-            user = auth_service.get_current_user(token)
-            is_authenticated = user is not None
+            payload = auth_service.decode_token(token)
+            is_authenticated = payload is not None
         
         # Map cabin to travel class
         travel_class = map_cabin_to_travel_class(cabin)
@@ -393,6 +433,9 @@ async def get_return_flights(
         )
     
     except Exception as e:
+        print(f"❌ return-flights error: {type(e).__name__}: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

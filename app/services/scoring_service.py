@@ -35,37 +35,40 @@ class DimensionWeights:
 
 # Define weights for each traveler type
 TRAVELER_WEIGHTS: Dict[TravelerType, DimensionWeights] = {
-    # Students: Most price-sensitive, prefer direct flights to save time/hassle
+    # Students: Price-sensitive, prefer direct flights to save time/hassle
+    # Priority: direct (efficiency) + price (value)
     TravelerType.STUDENT: DimensionWeights(
-        safety=0.10,       # Safety still matters
-        reliability=0.12,
-        comfort=0.12,
-        service=0.08,
-        value=0.33,        # Price is most important!
-        amenities=0.10,
-        efficiency=0.15,
+        safety=0.08,       # Safety still matters
+        reliability=0.08,
+        comfort=0.08,
+        service=0.05,
+        value=0.35,        # Price is most important!
+        amenities=0.06,
+        efficiency=0.30,   # Direct flights strongly preferred
     ),
     
-    # Business travelers: Time is money, need reliability and premium service
+    # Business travelers: Need reliability, premium service, and direct flights
+    # Priority: direct (efficiency) + service + reliability
     TravelerType.BUSINESS: DimensionWeights(
-        safety=0.10,
-        reliability=0.25,
-        comfort=0.18,
-        service=0.18,
-        value=0.09,
-        amenities=0.10,
-        efficiency=0.10,
+        safety=0.08,
+        reliability=0.25,  # Reliability is critical
+        comfort=0.10,
+        service=0.22,      # Premium service matters
+        value=0.05,
+        amenities=0.05,
+        efficiency=0.25,   # Direct flights strongly preferred
     ),
     
-    # Families: Comfort and service matter most for kids
+    # Families: Comfort and amenities matter most, prefer direct flights for kids
+    # Priority: direct (efficiency) + comfort + amenities
     TravelerType.FAMILY: DimensionWeights(
-        safety=0.15,       # Safety especially important for families
-        reliability=0.17,
-        comfort=0.22,
-        service=0.22,
-        value=0.12,
-        amenities=0.08,
-        efficiency=0.04,
+        safety=0.10,       # Safety especially important for families
+        reliability=0.10,
+        comfort=0.25,      # Comfort is critical for families
+        service=0.08,
+        value=0.07,
+        amenities=0.20,    # Amenities important for kids
+        efficiency=0.20,   # Direct flights preferred with kids
     ),
     
     # Default/General: Balanced weights

@@ -33,7 +33,7 @@ router = APIRouter(prefix="/v1/flights", tags=["Flights"])
 
 def map_cabin_to_travel_class(cabin: str) -> int:
     """Map cabin string to SerpAPI travel_class integer."""
-    cabin_lower = cabin.lower()
+    cabin_lower = cabin.lower().replace("_", " ")
     if cabin_lower in ["business", "公务舱"]:
         return 3
     elif cabin_lower in ["first", "头等舱"]:

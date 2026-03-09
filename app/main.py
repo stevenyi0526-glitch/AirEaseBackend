@@ -20,7 +20,6 @@ from app.routes.recommendations import router as recommendations_router
 from app.routes.reports import router as reports_router
 from app.routes.booking import router as booking_router
 from app.routes.autocomplete import router as autocomplete_router
-from app.routes.price_insights import router as price_insights_router
 from app.routes.user_preferences import router as user_preferences_router
 from app.routes.exchange_rates import router as exchange_rates_router
 from app.routes.aircraft import router as aircraft_router
@@ -35,7 +34,7 @@ async def lifespan(app: FastAPI):
     # Startup
     print("🛫 AirEase Backend starting...")
     print(f"   Debug mode: {settings.debug}")
-    print(f"   SerpAPI (Flights/Price): {'✓ configured' if settings.serpapi_key else '✗ not configured'}")
+    print(f"   SerpAPI (Flights): {'✓ configured' if settings.serpapi_key else '✗ not configured'}")
     print(f"   Amadeus (Autocomplete): {'✓ configured' if settings.amadeus_api_key else '✗ not configured'}")
     print(f"   Gemini API: {'✓ configured' if settings.gemini_api_key else '✗ not configured'}")
     print(f"   Amadeus API: {'✓ configured' if settings.amadeus_api_key else '✗ not configured'}")
@@ -127,7 +126,7 @@ app.include_router(airports_router)
 app.include_router(autocomplete_router)
 app.include_router(flights_router)
 app.include_router(booking_router)
-app.include_router(price_insights_router)
+# Price insights removed - no longer needed
 app.include_router(ai_router)
 app.include_router(recommendations_router)
 app.include_router(user_preferences_router)

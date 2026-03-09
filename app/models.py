@@ -394,12 +394,20 @@ class UserCreate(UserBase):
     """User registration request"""
     password: str = Field(min_length=6)
     label: UserLabel = UserLabel.BUSINESS
+    enc: Optional[str] = Field(default=None, alias="_enc")
+
+    class Config:
+        populate_by_name = True
 
 
 class UserLogin(BaseModel):
     """User login request"""
     email: EmailStr
     password: str
+    enc: Optional[str] = Field(default=None, alias="_enc")
+
+    class Config:
+        populate_by_name = True
 
 
 class VerificationRequest(BaseModel):
@@ -433,12 +441,20 @@ class ResetPasswordRequest(BaseModel):
     email: EmailStr
     code: str = Field(min_length=6, max_length=6)
     new_password: str = Field(min_length=6)
+    enc: Optional[str] = Field(default=None, alias="_enc")
+
+    class Config:
+        populate_by_name = True
 
 
 class ChangePasswordRequest(BaseModel):
     """Request to change password (while logged in)"""
     current_password: str
     new_password: str = Field(min_length=6)
+    enc: Optional[str] = Field(default=None, alias="_enc")
+
+    class Config:
+        populate_by_name = True
 
 
 class UserUpdate(BaseModel):

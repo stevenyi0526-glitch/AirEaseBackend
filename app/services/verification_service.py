@@ -3,6 +3,7 @@ AirEase Backend - Email Verification Service
 Handles email verification codes for user registration
 """
 
+import os
 import random
 import string
 import logging
@@ -18,6 +19,19 @@ from email.mime.multipart import MIMEMultipart
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# ── Dedicated file logger for verification events ──
+_VERIFICATION_LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "logs")
+os.makedirs(_VERIFICATION_LOG_DIR, exist_ok=True)
+_VERIFICATION_LOG_PATH = os.path.join(_VERIFICATION_LOG_DIR, "verification.log")
+
+_vlog = logging.getLogger("verification_audit")
+_vlog.setLevel(logging.INFO)
+_vlog.propagate = False  # don't bubble up to root logger
+if not _vlog.handlers:
+    _fh = logging.FileHandler(_VERIFICATION_LOG_PATH, encoding="utf-8")
+    _fh.setFormatter(logging.Formatter("%(message)s"))
+    _vlog.addHandler(_fh)
 
 
 class VerificationService:
@@ -119,6 +133,81 @@ class VerificationService:
             return user_data
         
         return None
+    
+    def verify_code_detailed(self, email: str, submitted_code: str) -> dict:
+        """
+        Verify the submitted code with detailed status for better error messages.
+        
+        Returns a dict with:
+          - status: "success" | "no_pending" | "expired" | "wrong_code"
+          - user_data: dict (only if status == "success")
+          - stored_code: the code that was stored (for logging)
+        """
+        email_lower = email.lower()
+        
+        if email_lower not in self._pending_verifications:
+            return {"status": "no_pending", "stored_code": "N/A"}
+        
+        stored_code, expiry, user_data = self._pending_verifications[email_lower]
+        
+        # Check if expired
+        if datetime.utcnow() > expiry:
+            del self._pending_verifications[email_lower]
+            return {"status": "expired", "stored_code": stored_code}
+        
+        # Check if code matches
+        if submitted_code != stored_code:
+            return {"status": "wrong_code", "stored_code": stored_code}
+        
+        # Success – remove from pending
+        del self._pending_verifications[email_lower]
+        return {"status": "success", "user_data": user_data, "stored_code": stored_code}
+    
+    def log_verification_event(
+        self,
+        username: str,
+        email: str,
+        code_sent: str,
+        event_type: str = "SEND",
+        user_code_input: str = "",
+        result: str = ""
+    ) -> None:
+        """
+        Write a structured log entry to the verification log file.
+        
+        Format:
+        ────────────────────────
+        [SEND] / [VERIFY] / [RESEND]
+        账号：testin01
+        邮箱：xzzhanga@gmail.com
+        验证码_send：009616
+        user_code_input：xxxxxx
+        result：success / wrong_code / expired / no_pending
+        时间：20260305 16:56
+        ────────────────────────
+        """
+        now = datetime.utcnow().strftime("%Y%m%d %H:%M:%S")
+        lines = [
+            "────────────────────────",
+            f"[{event_type}]",
+            f"账号：{username}",
+            f"邮箱：{email}",
+            f"验证码_send：{code_sent}",
+        ]
+        if user_code_input:
+            lines.append(f"user_code_input：{user_code_input}")
+        if result:
+            lines.append(f"result：{result}")
+        lines.append(f"时间：{now}")
+        lines.append("────────────────────────")
+        
+        msg = "\n".join(lines)
+        _vlog.info(msg)
+        # Also print to stdout for real-time visibility
+        print(f"📋 Verification [{event_type}] — {email} — code_sent={code_sent}"
+              + (f" — user_input={user_code_input}" if user_code_input else "")
+              + (f" — result={result}" if result else ""),
+              flush=True)
     
     def clear_pending(self, email: str) -> None:
         """Remove pending registration for an email."""

@@ -30,6 +30,7 @@ SORT_TO_DIMENSION = {
     "comfort": "comfort",
     "departure": "duration",  # departure time sorting → efficiency-minded → duration
     "arrival": "duration",
+    "model": "comfort",       # aircraft model sorting → comfort preference
 }
 
 
@@ -135,11 +136,17 @@ class RecommendationService:
         return [top_name, second_name]
 
     def _defaults_from_label(self, user_label: str) -> Dict[str, Any]:
-        """Return sensible defaults based on user_label when no behavior data."""
+        """Return sensible defaults based on user_label when no behavior data.
+        
+        Priorities per user type:
+        - student: direct flights + price (value)
+        - business: direct flights + service + reliability
+        - family: direct flights + comfort + amenities
+        """
         label_defaults = {
-            "student":  {"preferred_time": "6-12", "preferred_dimensions": ["price"],              "preferred_airline": None},
-            "business": {"preferred_time": "6-12", "preferred_dimensions": ["comfort", "duration"], "preferred_airline": None},
-            "family":   {"preferred_time": "6-12", "preferred_dimensions": ["comfort", "price"],    "preferred_airline": None},
+            "student":  {"preferred_time": "6-12", "preferred_dimensions": ["price", "duration"],    "preferred_airline": None},
+            "business": {"preferred_time": "6-12", "preferred_dimensions": ["duration", "comfort"],  "preferred_airline": None},
+            "family":   {"preferred_time": "6-12", "preferred_dimensions": ["comfort"],              "preferred_airline": None},
         }
         defaults = label_defaults.get(user_label, label_defaults["business"])
         return {**defaults, "has_data": False, "user_label": user_label}
@@ -223,6 +230,33 @@ class RecommendationService:
                     pts += (comfort / 10) * weight
                     if comfort >= 7:
                         reasons.append("High comfort" if i == 0 else "Comfortable")
+
+            # --- Q2b: User-label-based bonus dimensions (max +10) ---
+            user_label = preferences.get("user_label", "default")
+            if user_label == "business":
+                # Business: bonus for service + reliability
+                svc = dims.get("service", 5)
+                rel = dims.get("reliability", 5)
+                pts += ((svc + rel) / 20) * 10
+                if svc >= 7 and rel >= 7:
+                    reasons.append("Reliable & premium service")
+                elif rel >= 7:
+                    reasons.append("Highly reliable")
+                elif svc >= 7:
+                    reasons.append("Premium service")
+            elif user_label == "family":
+                # Family: bonus for amenities + comfort
+                amen = dims.get("amenities", 5)
+                comf = dims.get("comfort", 5)
+                pts += ((amen + comf) / 20) * 10
+                if amen >= 7:
+                    reasons.append("Family-friendly amenities")
+            elif user_label == "student":
+                # Student: extra bonus for value
+                val = dims.get("value", 5)
+                pts += (val / 10) * 10
+                if val >= 7:
+                    reasons.append("Budget-friendly")
 
             # --- Q3: Airline match (max +15) ---
             if preferred_airline:
@@ -325,6 +359,7 @@ class RecommendationService:
             "price": "sort_by_price_count", "comfort": "sort_by_comfort_count",
             "duration": "sort_by_duration_count",
             "departure": "sort_by_departure_count", "arrival": "sort_by_arrival_count",
+            "model": "sort_by_comfort_count",  # model preference → comfort
         }
         col = column_map.get(sort_by)
         if col:

@@ -3,6 +3,8 @@ AirEase Backend - Authentication Routes
 User registration, login, and profile endpoints
 """
 
+import base64
+import logging
 from fastapi import APIRouter, HTTPException, Depends, status, Header
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -16,7 +18,24 @@ from app.models import (
 from app.services.auth_service import auth_service
 from app.services.verification_service import verification_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
+
+
+def _decode_password(password: str, is_encoded: bool) -> str:
+    """
+    Decode a Base64-encoded password sent from the frontend.
+    If _enc flag is not set, return as-is for backward compatibility.
+    """
+    if not is_encoded:
+        return password
+    try:
+        decoded_bytes = base64.b64decode(password)
+        return decoded_bytes.decode('utf-8')
+    except Exception:
+        # If decoding fails, treat as plain password
+        return password
 
 
 # ============================================================
@@ -97,20 +116,32 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
             detail="Email already registered"
         )
 
+    # Decode password if Base64 encoded from frontend
+    is_encoded = (user_data.enc == 'base64')
+    plain_password = _decode_password(user_data.password, is_encoded)
+
     # Generate verification code
     code = verification_service.generate_code()
     
-    # Store pending registration
+    # Store pending registration (store decoded password)
     user_dict = {
         "email": user_data.email,
         "username": user_data.username,
-        "password": user_data.password,
+        "password": plain_password,
         "label": user_data.label.value
     }
     verification_service.store_pending_registration(
         email=user_data.email,
         code=code,
         user_data=user_dict
+    )
+    
+    # Log verification info for debugging
+    verification_service.log_verification_event(
+        username=user_data.username,
+        email=user_data.email,
+        code_sent=code,
+        event_type="SEND"
     )
     
     # Send verification email
@@ -153,17 +184,42 @@ async def verify_email(
 
     Returns JWT token on successful verification.
     """
-    # Verify the code and get user data
-    user_data = verification_service.verify_code(
+    # Verify the code and get user data — use detailed verification
+    result = verification_service.verify_code_detailed(
         email=verification.email,
         submitted_code=verification.code
     )
     
-    if not user_data:
+    # Log verification attempt
+    verification_service.log_verification_event(
+        username="(verify-attempt)",
+        email=verification.email,
+        code_sent=result.get("stored_code", "N/A"),
+        event_type="VERIFY",
+        user_code_input=verification.code,
+        result=result["status"]
+    )
+    
+    if result["status"] == "no_pending":
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired verification code"
+            detail="No pending verification found. The code may have expired. Please register again."
         )
+    
+    if result["status"] == "expired":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Verification code has expired. Please request a new code."
+        )
+    
+    if result["status"] == "wrong_code":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Incorrect verification code. Please check and try again."
+        )
+    
+    # status == "success"
+    user_data = result["user_data"]
     
     # Double-check email doesn't exist (race condition protection)
     existing_user = db.query(UserDB).filter(UserDB.user_email == verification.email).first()
@@ -248,6 +304,14 @@ async def resend_verification(
         user_data=user_data
     )
     
+    # Log resend event
+    verification_service.log_verification_event(
+        username=user_data.get("username", "User"),
+        email=request.email,
+        code_sent=new_code,
+        event_type="RESEND"
+    )
+    
     # Send new verification email
     email_sent = await verification_service.send_verification_email(
         email=request.email,
@@ -283,6 +347,10 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
 
     Returns JWT token on successful authentication.
     """
+    # Decode password if Base64 encoded from frontend
+    is_encoded = (credentials.enc == 'base64')
+    plain_password = _decode_password(credentials.password, is_encoded)
+
     # Find user by email
     user = db.query(UserDB).filter(UserDB.user_email == credentials.email).first()
 
@@ -293,7 +361,7 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
         )
 
     # Verify password
-    if not auth_service.verify_password(credentials.password, user.user_password):
+    if not auth_service.verify_password(plain_password, user.user_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
@@ -483,7 +551,9 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
         )
     
     # Update password
-    user.user_password = auth_service.hash_password(request.new_password)
+    is_encoded = (request.enc == 'base64')
+    plain_new_password = _decode_password(request.new_password, is_encoded)
+    user.user_password = auth_service.hash_password(plain_new_password)
     db.commit()
     
     return {"message": "Password has been reset successfully. Please log in with your new password."}
@@ -505,15 +575,20 @@ async def change_password(
     - **current_password**: Current account password
     - **new_password**: New password (minimum 6 characters)
     """
+    # Decode passwords if Base64 encoded from frontend
+    is_encoded = (request.enc == 'base64')
+    plain_current_password = _decode_password(request.current_password, is_encoded)
+    plain_new_password = _decode_password(request.new_password, is_encoded)
+
     # Verify current password
-    if not auth_service.verify_password(request.current_password, current_user.user_password):
+    if not auth_service.verify_password(plain_current_password, current_user.user_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current password is incorrect"
         )
     
     # Update password
-    current_user.user_password = auth_service.hash_password(request.new_password)
+    current_user.user_password = auth_service.hash_password(plain_new_password)
     db.commit()
     
     return {"message": "Password changed successfully"}

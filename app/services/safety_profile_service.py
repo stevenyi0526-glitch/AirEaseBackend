@@ -527,6 +527,7 @@ def build_safety_profile(
     image_attribution: Optional[str] = None
     adb_info: Optional[Dict[str, Any]] = None
     num_seats: Optional[int] = None
+    num_engines: Optional[int] = None
 
     # Determine the best registration to use for AeroDataBox
     adb_reg = tail_number
@@ -558,6 +559,8 @@ def build_safety_profile(
             resolved_model = adb_info["typeName"]
         if adb_info.get("numSeats"):
             num_seats = adb_info["numSeats"]
+        if adb_info.get("numEngines"):
+            num_engines = adb_info["numEngines"]
         image_url = adb_info.get("imageUrl")
         image_attribution = adb_info.get("imageAttribution")
 
@@ -571,6 +574,24 @@ def build_safety_profile(
         eng_type = inferred
     elif inferred and not eng_type:
         eng_type = inferred
+
+    # --- Step 4c: Infer num_engines from engine string if not set ---
+    if not num_engines and engine_str:
+        import re as _re
+        m = _re.match(r'^(\d+)\s*[x×]', engine_str, _re.IGNORECASE)
+        if m:
+            num_engines = int(m.group(1))
+    # Fallback: infer from aircraft model name
+    if not num_engines and (resolved_model or model):
+        _mdl = (resolved_model or model or "").lower()
+        QUAD_ENGINE = ["747", "a380", "a340"]
+        SINGLE_ENGINE = ["cessna", "piper", "cirrus", "beechcraft bonanza"]
+        if any(q in _mdl for q in QUAD_ENGINE):
+            num_engines = 4
+        elif any(s in _mdl for s in SINGLE_ENGINE):
+            num_engines = 1
+        elif any(t in _mdl for t in ["737", "777", "787", "767", "757", "a3", "a2", "crj", "erj", "embraer", "bombardier"]):
+            num_engines = 2
 
     # --- Step 5: Accident queries ---
     plane_accidents = get_plane_accidents(tail_number) if tail_number else None
@@ -605,6 +626,7 @@ def build_safety_profile(
             "eng_mfgr": eng_mfgr,
             "eng_model": eng_model,
             "eng_type": eng_type,
+            "num_engines": num_engines,
         },
         "safety_records": {
             "this_plane_accidents": plane_accidents,

@@ -395,6 +395,7 @@ class UserCreate(UserBase):
     password: str = Field(min_length=6)
     label: UserLabel = UserLabel.BUSINESS
     enc: Optional[str] = Field(default=None, alias="_enc")
+    ph: Optional[str] = Field(default=None, alias="_ph")
 
     class Config:
         populate_by_name = True
@@ -405,6 +406,7 @@ class UserLogin(BaseModel):
     email: EmailStr
     password: str
     enc: Optional[str] = Field(default=None, alias="_enc")
+    ph: Optional[str] = Field(default=None, alias="_ph")
 
     class Config:
         populate_by_name = True
@@ -442,6 +444,7 @@ class ResetPasswordRequest(BaseModel):
     code: str = Field(min_length=6, max_length=6)
     new_password: str = Field(min_length=6)
     enc: Optional[str] = Field(default=None, alias="_enc")
+    ph: Optional[str] = Field(default=None, alias="_ph")
 
     class Config:
         populate_by_name = True
@@ -452,6 +455,8 @@ class ChangePasswordRequest(BaseModel):
     current_password: str
     new_password: str = Field(min_length=6)
     enc: Optional[str] = Field(default=None, alias="_enc")
+    ph_current: Optional[str] = Field(default=None, alias="_ph_current")
+    ph_new: Optional[str] = Field(default=None, alias="_ph_new")
 
     class Config:
         populate_by_name = True

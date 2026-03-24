@@ -441,6 +441,15 @@ class GeminiService:
         elif any(w in q_lower for w in ["night", "red-eye", "red eye", "凌晨"]):
             time_pref = "night"
         
+        # Apply smart defaults for missing fields
+        # Date: default to tomorrow if not specified
+        if not date_str:
+            date_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
+        # Stops: default to direct if not specified
+        if stops == "any":
+            stops = "0"
+        # Time: keep 'any' as-is (all day, no time filter)
+        
         return {
             "has_destination": bool(destination_code),
             "destination_city": destination_city,
@@ -470,18 +479,29 @@ class GeminiService:
         prompt = f"""You are an AI flight search parser. Parse the user's natural language query and extract flight search parameters.
 
 IMPORTANT: Always respond in English. Always use English city names in your response.
+IMPORTANT: If the user only provides a city or destination name (e.g. "Tokyo", "上海"), treat it as a destination and set has_destination=true. Apply all defaults for missing fields.
+
+## Defaults (apply when not mentioned by user):
+- date: tomorrow ({(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")})
+- time_preference: any (all day, no time filter)
+- passengers: 1
+- cabin_class: economy
+- sort_by: score
+- stops: 0 (direct flights)
+- aircraft_type: any
+- alliance: any
 
 ## Your Task:
 Extract the following from the user's query:
 1. **destination** (REQUIRED) - The arrival city/airport (must be provided by user)
 2. **departure** (optional) - The departure city/airport (if not provided, will be auto-detected)
-3. **date** (optional) - Travel date (if not provided, defaults to today)
-4. **time_preference** (optional) - morning(6-12), afternoon(12-18), evening(18-22), night(22-6)
+3. **date** (optional) - Travel date (if not provided, defaults to tomorrow)
+4. **time_preference** (optional) - morning(6-12), afternoon(12-18), evening(18-22), night(22-6). Default: morning
 5. **passengers** (optional) - Number of passengers (defaults to 1)
 6. **cabin_class** (optional) - economy, premium_economy, business, first (defaults to economy)
-7. **sort_preference** (optional) - What to prioritize: comfort, price, duration, or balanced
-8. **stops** (optional) - Number of stops: "0" for direct/nonstop, "1" for 1 stop, "2+" for 2+ stops, "any" if not mentioned
-9. **aircraft_type** (optional) - "widebody" or "narrowbody" or "any"
+7. **sort_preference** (optional) - What to prioritize: comfort, price, duration, or balanced (defaults to score)
+8. **stops** (optional) - Number of stops: "0" for direct/nonstop, "1" for 1 stop, "2+" for 2+ stops. Default: "0" (direct)
+9. **aircraft_type** (optional) - "widebody" or "narrowbody" or "any" (defaults to any)
 10. **alliance** (optional) - "star", "oneworld", "skyteam" or "any"
 11. **max_price** (optional) - Maximum price budget in USD if mentioned, null if not
 12. **preferred_airlines** (optional) - Specific airline IATA codes if mentioned
@@ -505,6 +525,7 @@ Extract the following from the user's query:
 - Melbourne: MEL
 
 ## Date Interpretation (Today is {today}):
+- No date mentioned → tomorrow (calculate actual date)
 - "today" → {today}
 - "tomorrow" → calculate actual date
 - "next Friday" / "下周五" → calculate actual date
@@ -526,7 +547,7 @@ Extract the following from the user's query:
 - "direct" / "nonstop" / "non-stop" / "直飞" → 0
 - "1 stop" / "one stop" / "转一次" → 1
 - "2 stops" / "multiple stops" → 2+
-- Not mentioned → any
+- Not mentioned → 0 (default to direct flights)
 
 ## Aircraft Type Interpretation:
 - "widebody" / "large plane" / "777" / "A350" / "787" / "大飞机" → widebody

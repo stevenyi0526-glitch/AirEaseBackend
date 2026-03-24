@@ -263,6 +263,8 @@ class SerpAPIFlightService:
             "hl": "en",
             "gl": "us",
             "departure_token": departure_token,
+            "deep_search": "true",    # Get more complete results
+            "show_hidden": "true",    # Include hidden flight options
         }
         
         if travel_class:
@@ -273,6 +275,14 @@ class SerpAPIFlightService:
         async with httpx.AsyncClient() as client:
             response = await client.get(self.BASE_URL, params=params, timeout=30.0)
             data = response.json()
+        
+        # Log the raw response for debugging
+        best_count = len(data.get("best_flights", []))
+        other_count = len(data.get("other_flights", []))
+        error_info = data.get("error")
+        print(f"[ReturnFlights] departure_token response: best_flights={best_count}, other_flights={other_count}, error={error_info}")
+        if best_count == 0 and other_count == 0:
+            print(f"[ReturnFlights] ⚠️ No return flights found for departure_token. Raw keys: {list(data.keys())}")
         
         # Determine cabin filter
         cabin_map = {1: "economy", 2: "premium economy", 3: "business", 4: "first"}
@@ -412,13 +422,39 @@ class SerpAPIFlightService:
         airplane = first_segment.get("airplane", "Unknown Aircraft")
         travel_class = first_segment.get("travel_class", "Economy")
         
-        # Extract legroom
-        legroom = first_segment.get("legroom", "")
-        legroom_inches = self._parse_legroom(legroom)
+        # Extract legroom — check all segments and extensions for the best data
+        legroom = ""
+        legroom_inches = None
+        for seg in segments:
+            seg_legroom = seg.get("legroom", "")
+            if seg_legroom:
+                parsed_inches = self._parse_legroom(seg_legroom)
+                if parsed_inches and (legroom_inches is None or parsed_inches > 0):
+                    legroom = seg_legroom
+                    legroom_inches = parsed_inches
+                    break  # Use first segment with legroom data
         
-        # Parse extensions (amenities)
+        # Fallback: parse legroom from extensions if not found in segment fields
+        if not legroom:
+            for seg in segments:
+                for ext in seg.get("extensions", []):
+                    ext_lower = ext.lower()
+                    if "legroom" in ext_lower and "in)" in ext_lower:
+                        # Parse "Average legroom (31 in)" or "Above average legroom (32 in)"
+                        import re
+                        match = re.search(r'\((\d+)\s*in\)', ext_lower)
+                        if match:
+                            legroom = f"{match.group(1)} in"
+                            legroom_inches = int(match.group(1))
+                            break
+                    elif "extra reclining seat" in ext_lower and not legroom:
+                        legroom = "Extra reclining seat"
+                if legroom:
+                    break
+        
+        # Parse extensions (amenities) from first segment
         extensions = first_segment.get("extensions", [])
-        facilities = self._parse_amenities(extensions, legroom_inches)
+        facilities = self._parse_amenities(extensions, legroom_inches, legroom)
         
         # Get carbon emissions
         carbon_data = flight_data.get("carbon_emissions", {})
@@ -498,7 +534,8 @@ class SerpAPIFlightService:
     def _parse_amenities(
         self,
         extensions: List[str],
-        legroom_inches: Optional[int]
+        legroom_inches: Optional[int],
+        legroom_raw: str = ""
     ) -> FlightFacilities:
         """Parse amenities from SerpAPI extensions list.
         
@@ -573,6 +610,7 @@ class SerpAPIFlightService:
             meal_included=meal_included,
             meal_type=meal_type,
             wifi_free=wifi_free,  # Add wifi_free to track if free
+            legroom=legroom_raw if legroom_raw else None,
         )
     
     def _extract_airline_code(self, flight_number: str) -> str:

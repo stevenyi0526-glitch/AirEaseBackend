@@ -239,17 +239,17 @@ async def update_traveler(
     if update_data.first_name is not None:
         traveler.first_name = update_data.first_name
     if update_data.middle_name is not None:
-        traveler.middle_name = update_data.middle_name
+        traveler.middle_name = update_data.middle_name or None  # "" → None
     if update_data.last_name is not None:
         traveler.last_name = update_data.last_name
     if update_data.passport_number is not None:
-        traveler.passport_number = update_data.passport_number
+        traveler.passport_number = update_data.passport_number or None  # "" → None
     if update_data.dob is not None:
         traveler.dob = update_data.dob
     if update_data.nationality is not None:
-        traveler.nationality = update_data.nationality
+        traveler.nationality = update_data.nationality or None  # "" → None
     if update_data.gender is not None:
-        traveler.gender = update_data.gender
+        traveler.gender = update_data.gender or None  # "" → None
     
     db.commit()
     db.refresh(traveler)

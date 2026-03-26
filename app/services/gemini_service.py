@@ -442,12 +442,11 @@ class GeminiService:
             time_pref = "night"
         
         # Apply smart defaults for missing fields
-        # Date: default to tomorrow if not specified
+        # Date: default to today if not specified (nearest flights)
         if not date_str:
-            date_str = (today + timedelta(days=1)).strftime("%Y-%m-%d")
-        # Stops: default to direct if not specified
-        if stops == "any":
-            stops = "0"
+            date_str = today.strftime("%Y-%m-%d")
+        # Stops: keep 'any' if not specified (show all flights)
+        # Only filter by stops if user explicitly requested direct/nonstop
         # Time: keep 'any' as-is (all day, no time filter)
         
         return {
@@ -482,12 +481,12 @@ IMPORTANT: Always respond in English. Always use English city names in your resp
 IMPORTANT: If the user only provides a city or destination name (e.g. "Tokyo", "上海"), treat it as a destination and set has_destination=true. Apply all defaults for missing fields.
 
 ## Defaults (apply when not mentioned by user):
-- date: tomorrow ({(datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")})
+- date: today ({datetime.now().strftime("%Y-%m-%d")})
 - time_preference: any (all day, no time filter)
 - passengers: 1
 - cabin_class: economy
 - sort_by: score
-- stops: 0 (direct flights)
+- stops: any (all flights, no stops filter)
 - aircraft_type: any
 - alliance: any
 
@@ -500,7 +499,7 @@ Extract the following from the user's query:
 5. **passengers** (optional) - Number of passengers (defaults to 1)
 6. **cabin_class** (optional) - economy, premium_economy, business, first (defaults to economy)
 7. **sort_preference** (optional) - What to prioritize: comfort, price, duration, or balanced (defaults to score)
-8. **stops** (optional) - Number of stops: "0" for direct/nonstop, "1" for 1 stop, "2+" for 2+ stops. Default: "0" (direct)
+8. **stops** (optional) - Number of stops: "0" for direct/nonstop, "1" for 1 stop, "2+" for 2+ stops, "any" for all flights. Default: "any" (all flights)
 9. **aircraft_type** (optional) - "widebody" or "narrowbody" or "any" (defaults to any)
 10. **alliance** (optional) - "star", "oneworld", "skyteam" or "any"
 11. **max_price** (optional) - Maximum price budget in USD if mentioned, null if not
@@ -525,7 +524,7 @@ Extract the following from the user's query:
 - Melbourne: MEL
 
 ## Date Interpretation (Today is {today}):
-- No date mentioned → tomorrow (calculate actual date)
+- No date mentioned → today (show nearest available flights)
 - "today" → {today}
 - "tomorrow" → calculate actual date
 - "next Friday" / "下周五" → calculate actual date
@@ -547,7 +546,7 @@ Extract the following from the user's query:
 - "direct" / "nonstop" / "non-stop" / "直飞" → 0
 - "1 stop" / "one stop" / "转一次" → 1
 - "2 stops" / "multiple stops" → 2+
-- Not mentioned → 0 (default to direct flights)
+- Not mentioned → any (show all flights, no filter)
 
 ## Aircraft Type Interpretation:
 - "widebody" / "large plane" / "777" / "A350" / "787" / "大飞机" → widebody

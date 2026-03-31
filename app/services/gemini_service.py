@@ -16,7 +16,7 @@ class GeminiService:
     """Gemini AI 服务 - 自然语言解析"""
     
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-    MODEL = "gemini-3-flash-preview"
+    MODEL = "gemini-3.1-flash-lite-preview"
     
     # Errors that indicate a geo-restriction or API-level block (not our fault)
     GEO_BLOCK_KEYWORDS = [

@@ -24,67 +24,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
 
 
-import re
-
-
-def _is_nonce_xor_encrypted(password: str) -> bool:
+def _decode_password(password: str, enc_type: str) -> str:
     """
-    Check if the password matches the nonce-XOR-encrypted format:
-    exactly 96 lowercase hex characters (no dots, no separators).
+    Process password based on encoding type from the frontend.
     
-    Layout: nonce (32 hex = 16 bytes) + masked (64 hex = 32 bytes) = 96 hex total.
+    - 'sha256': Password is a SHA-256 hex digest. Use it as-is since it's
+      already a one-way hash. The server will hash it again with sha256_crypt
+      for storage. This prevents the original password from ever being visible
+      in network logs or DevTools.
+    - 'base64': Legacy Base64 encoding (reversible). Decode to get plain text.
+      Kept for backward compatibility with existing sessions.
+    - Otherwise: Plain text password (no encoding).
     """
-    return bool(re.fullmatch(r'[0-9a-f]{96}', password))
-
-
-def _decrypt_nonce_xor(transmitted: str) -> bytes:
-    """
-    Decrypt a nonce-XOR-encrypted blob → raw 32 bytes.
-    
-    transmitted = hex(nonce_16bytes) + hex(encrypted_32bytes) — 96 hex chars
-    
-    Returns the raw 32-byte plaintext (caller decides interpretation).
-    """
-    raw = bytes.fromhex(transmitted)
-    nonce = raw[:16]      # 16 bytes
-    masked = raw[16:48]   # 32 bytes
-    mask = hashlib.sha256(nonce).digest()  # 32 bytes
-    return bytes(m ^ k for m, k in zip(masked, mask))
-
-
-def _decrypt_nonce_xor_hex(transmitted: str) -> str:
-    """Decrypt nonce-XOR blob → hex string of the 32-byte payload."""
-    return _decrypt_nonce_xor(transmitted).hex()
-
-
-def _decrypt_nonce_xor_utf8(transmitted: str) -> str:
-    """
-    Decrypt nonce-XOR blob → UTF-8 string (plain password).
-    The payload was zero-padded to 32 bytes, so strip trailing NUL bytes.
-    """
-    raw = _decrypt_nonce_xor(transmitted)
-    return raw.rstrip(b'\x00').decode('utf-8', errors='replace')
-
-
-def _decode_password(password: str, enc_type: str = '') -> str:
-    """
-    Process password from the frontend, auto-detecting the format.
-    
-    Formats (checked in order):
-    1. Nonce-XOR-encrypted (96 hex chars) → decrypt to SHA-256(plain) hex string.
-       This is the new secure format. The network payload is a random-looking
-       96-char hex blob that changes every request.
-    2. 'sha256' enc_type → direct SHA-256 hex digest, use as-is.
-    3. 'base64' enc_type → legacy Base64, decode to plain text.
-    4. Otherwise → plain text.
-    """
-    if _is_nonce_xor_encrypted(password):
-        return _decrypt_nonce_xor_hex(password)
     if enc_type == 'sha256':
+        # SHA-256 hex digest — already irreversible, use directly
         return password
     if enc_type == 'base64':
         try:
-            return base64.b64decode(password).decode('utf-8')
+            decoded_bytes = base64.b64decode(password)
+            return decoded_bytes.decode('utf-8')
         except Exception:
             return password
     return password
@@ -399,14 +357,9 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
 
     Returns JWT token on successful authentication.
     """
-    # Decode/process password — _decode_password auto-detects format:
-    #   - 96-hex nonce-XOR → decrypts to SHA-256(plain_password) hex string
-    #   - sha256 enc_type  → SHA-256 hex string as-is
-    #   - base64 enc_type  → decoded plain text
-    #   - otherwise        → plain text
+    # Decode/process password based on encoding type from frontend
     enc_type = credentials.enc or ''
-    was_encrypted = _is_nonce_xor_encrypted(credentials.password)
-    decoded_password = _decode_password(credentials.password, enc_type)
+    plain_password = _decode_password(credentials.password, enc_type)
 
     # Find user by email
     user = db.query(UserDB).filter(UserDB.user_email == credentials.email).first()
@@ -417,41 +370,16 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
             detail="Invalid email or password"
         )
 
-    # ── Password verification ──────────────────────────────────
-    # decoded_password is SHA-256(plain) hex after nonce-XOR decryption.
-    # Stored hash is sha256_crypt(X) where X is:
-    #   - SHA-256(plain) for migrated accounts
-    #   - plain text for legacy (pre-migration) accounts
-    #
-    # Strategy: try decoded_password first (migrated), then use _ph
-    # (encrypted plain text) for legacy accounts.
-
-    password_ok = auth_service.verify_password(decoded_password, user.user_password)
-
-    if not password_ok and was_encrypted and credentials.ph:
-        # Legacy account: stored = sha256_crypt(plain_text)
-        # _ph field contains nonce-XOR encrypted raw plain password
-        try:
-            plain_from_ph = _decrypt_nonce_xor_utf8(credentials.ph)
-            password_ok = auth_service.verify_password(plain_from_ph, user.user_password)
-            if password_ok:
-                # Migrate to SHA-256 scheme: re-hash with SHA-256(plain)
-                inner_hash = hashlib.sha256(plain_from_ph.encode()).hexdigest()
-                user.user_password = auth_service.hash_password(inner_hash)
-                db.commit()
-                logger.info(f"Migrated password hash for user {user.user_email} to SHA-256 scheme")
-        except Exception:
-            pass  # _ph decryption failed — fall through to 401
-
-    elif not password_ok and not was_encrypted:
-        # Unencrypted submission (old client) — try SHA-256(decoded) fallback
-        sha256_of_decoded = hashlib.sha256(decoded_password.encode()).hexdigest()
-        password_ok = auth_service.verify_password(sha256_of_decoded, user.user_password)
+    # Verify password — try plain first, then SHA-256(plain) for backward
+    # compatibility with accounts registered during the client-side hashing era.
+    password_ok = auth_service.verify_password(plain_password, user.user_password)
+    if not password_ok:
+        sha256_of_plain = hashlib.sha256(plain_password.encode()).hexdigest()
+        password_ok = auth_service.verify_password(sha256_of_plain, user.user_password)
         if password_ok:
-            pass  # Already using SHA-256 scheme in stored hash, no migration needed
-        else:
-            # Maybe plain text that matches directly (already tried above)
-            pass
+            # Migrate: re-hash with the plain password so future logins work directly
+            user.user_password = auth_service.hash_password(plain_password)
+            db.commit()
 
     if not password_ok:
         raise HTTPException(
@@ -669,32 +597,22 @@ async def change_password(
     """
     # Decode/process passwords based on encoding type from frontend
     enc_type = request.enc or ''
-    decoded_current = _decode_password(request.current_password, enc_type)
-    decoded_new = _decode_password(request.new_password, enc_type)
+    plain_current_password = _decode_password(request.current_password, enc_type)
+    plain_new_password = _decode_password(request.new_password, enc_type)
 
-    # Verify current password
-    password_ok = auth_service.verify_password(decoded_current, current_user.user_password)
-
-    if not password_ok and _is_nonce_xor_encrypted(request.current_password) and request.ph_current:
-        # Legacy fallback: try decrypting _ph_current for plain text
-        try:
-            plain_from_ph = _decrypt_nonce_xor_utf8(request.ph_current)
-            password_ok = auth_service.verify_password(plain_from_ph, current_user.user_password)
-        except Exception:
-            pass
-
+    # Verify current password (try plain, then SHA-256(plain) for backward compat)
+    password_ok = auth_service.verify_password(plain_current_password, current_user.user_password)
     if not password_ok:
-        sha256_of_current = hashlib.sha256(decoded_current.encode()).hexdigest()
-        password_ok = auth_service.verify_password(sha256_of_current, current_user.user_password)
-
+        sha256_of_plain = hashlib.sha256(plain_current_password.encode()).hexdigest()
+        password_ok = auth_service.verify_password(sha256_of_plain, current_user.user_password)
     if not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current password is incorrect"
         )
     
-    # Update password — store as sha256_crypt(SHA-256(plain)) for new scheme
-    current_user.user_password = auth_service.hash_password(decoded_new)
+    # Update password
+    current_user.user_password = auth_service.hash_password(plain_new_password)
     db.commit()
     
     return {"message": "Password changed successfully"}

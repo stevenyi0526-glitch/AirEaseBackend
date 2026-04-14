@@ -392,7 +392,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     """User registration request"""
-    password: str = Field(min_length=6)
+    password: str = Field(min_length=9)
     label: UserLabel = UserLabel.BUSINESS
     enc: Optional[str] = Field(default=None, alias="_enc")
     ph: Optional[str] = Field(default=None, alias="_ph")
@@ -442,7 +442,7 @@ class ResetPasswordRequest(BaseModel):
     """Request to reset password with verification code"""
     email: EmailStr
     code: str = Field(min_length=6, max_length=6)
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=9)
     enc: Optional[str] = Field(default=None, alias="_enc")
     ph: Optional[str] = Field(default=None, alias="_ph")
 
@@ -453,7 +453,7 @@ class ResetPasswordRequest(BaseModel):
 class ChangePasswordRequest(BaseModel):
     """Request to change password (while logged in)"""
     current_password: str
-    new_password: str = Field(min_length=6)
+    new_password: str = Field(min_length=9)
     enc: Optional[str] = Field(default=None, alias="_enc")
     ph_current: Optional[str] = Field(default=None, alias="_ph_current")
     ph_new: Optional[str] = Field(default=None, alias="_ph_new")
@@ -487,6 +487,7 @@ class Token(BaseModel):
     access_token: str = Field(alias="accessToken")
     token_type: str = Field(default="bearer", alias="tokenType")
     expires_in: int = Field(alias="expiresIn")  # seconds
+    password_update_required: bool = Field(default=False, alias="passwordUpdateRequired")
     user: UserResponse
 
     class Config:

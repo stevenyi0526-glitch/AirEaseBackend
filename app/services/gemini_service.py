@@ -404,6 +404,57 @@ class GeminiService:
                     if days_ahead <= 0:
                         days_ahead += 7
                     date_str = (today + timedelta(days=days_ahead)).strftime("%Y-%m-%d")
+                else:
+                    # Explicit "month day" or "day month" patterns: "april 14", "apr 14", "14 april", "4/14", "4-14"
+                    month_names = {
+                        "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+                        "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
+                        "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9,
+                        "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12
+                    }
+                    month_pattern = '|'.join(month_names.keys())
+                    # "april 14" or "apr 14"
+                    md_match = re.search(rf'({month_pattern})\s+(\d{{1,2}})', q_lower)
+                    if md_match:
+                        month_num = month_names[md_match.group(1)]
+                        day_num = int(md_match.group(2))
+                        year = today.year
+                        try:
+                            target_date = today.replace(month=month_num, day=day_num)
+                            if target_date < today:
+                                year += 1
+                            date_str = f"{year}-{month_num:02d}-{day_num:02d}"
+                        except ValueError:
+                            pass
+                    else:
+                        # "14 april" or "14 apr"
+                        dm_match = re.search(rf'(\d{{1,2}})\s+({month_pattern})', q_lower)
+                        if dm_match:
+                            day_num = int(dm_match.group(1))
+                            month_num = month_names[dm_match.group(2)]
+                            year = today.year
+                            try:
+                                target_date = today.replace(month=month_num, day=day_num)
+                                if target_date < today:
+                                    year += 1
+                                date_str = f"{year}-{month_num:02d}-{day_num:02d}"
+                            except ValueError:
+                                pass
+                        else:
+                            # "4/14" or "4-14" (month/day)
+                            slash_match = re.search(r'(\d{1,2})[/\-](\d{1,2})(?!\d)', q_lower)
+                            if slash_match:
+                                month_num = int(slash_match.group(1))
+                                day_num = int(slash_match.group(2))
+                                if 1 <= month_num <= 12 and 1 <= day_num <= 31:
+                                    year = today.year
+                                    try:
+                                        target_date = today.replace(month=month_num, day=day_num)
+                                        if target_date < today:
+                                            year += 1
+                                        date_str = f"{year}-{month_num:02d}-{day_num:02d}"
+                                    except ValueError:
+                                        pass
         
         # --- Cabin class ---
         cabin_class = "economy"

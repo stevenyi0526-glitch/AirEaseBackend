@@ -3,7 +3,7 @@ AirEase Backend - Database Configuration
 SQLAlchemy + PostgreSQL setup
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Enum as SQLEnum, func
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Enum as SQLEnum, func, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -54,6 +54,7 @@ class UserDB(Base):
     is_active = Column(Boolean, default=True)
     is_admin = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    needs_password_update = Column(Boolean, default=False, server_default='false')
     
     # Sort preference counters for AI recommendations
     sort_by_overall_count = Column(Integer, default=0)
@@ -266,8 +267,19 @@ class UserPreferencesCacheDB(Base):
 # ============================================================
 
 def init_db():
-    """Initialize database - create all tables"""
+    """Initialize database - create all tables and run lightweight migrations."""
     Base.metadata.create_all(bind=engine)
+
+    # Add needs_password_update column if it doesn't exist (migration)
+    with engine.connect() as conn:
+        try:
+            conn.execute(
+                text("ALTER TABLE users ADD COLUMN needs_password_update BOOLEAN DEFAULT false")
+            )
+            conn.commit()
+            print("   Migration: added needs_password_update column")
+        except Exception:
+            conn.rollback()  # Column already exists
 
 
 def get_db():

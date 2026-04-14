@@ -6,6 +6,7 @@ User registration, login, and profile endpoints
 import base64
 import hashlib
 import logging
+import re
 from fastapi import APIRouter, HTTPException, Depends, status, Header
 from sqlalchemy.orm import Session
 from typing import Optional
@@ -27,30 +28,89 @@ router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
 def _decode_password(password: str, enc_type: str) -> str:
     """
     Process password based on encoding type from the frontend.
-    
-    - 'sha256': Password is a SHA-256 hex digest. Use it as-is since it's
-      already a one-way hash. The server will hash it again with sha256_crypt
-      for storage. This prevents the original password from ever being visible
-      in network logs or DevTools.
-    - 'base64': Legacy Base64 encoding (reversible). Decode to get plain text.
-      Kept for backward compatibility with existing sessions.
-    - Otherwise: Plain text password (no encoding).
+    ALWAYS returns a SHA-256 hex digest — plain text is hashed here.
+
+    - 'sha256': Already a SHA-256 hex digest from the browser. Return as-is.
+    - 'nonce_xor_sha256': iOS nonce-XOR encoding → recovers SHA-256 hex.
+    - 'base64': Legacy Base64 encoding → decode to plain text → SHA-256.
+    - Otherwise: Plain text → SHA-256.
     """
     if enc_type == 'sha256':
-        # SHA-256 hex digest — already irreversible, use directly
         return password
+    if enc_type == 'nonce_xor_sha256':
+        try:
+            nonce_bytes = bytes.fromhex(password[:64])
+            xor_bytes = bytes.fromhex(password[64:128])
+            hash_bytes = bytes(a ^ b for a, b in zip(nonce_bytes, xor_bytes))
+            return hash_bytes.hex()
+        except Exception:
+            return hashlib.sha256(password.encode()).hexdigest()
     if enc_type == 'base64':
         try:
             decoded_bytes = base64.b64decode(password)
-            return decoded_bytes.decode('utf-8')
+            plain = decoded_bytes.decode('utf-8')
+            return hashlib.sha256(plain.encode()).hexdigest()
         except Exception:
-            return password
-    return password
+            return hashlib.sha256(password.encode()).hexdigest()
+    # Plain text → SHA-256
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
 # ============================================================
 # Helper Functions
 # ============================================================
+
+def _validate_password_strength(password: str) -> None:
+    """
+    Validate password meets strength requirements (plain text, before hashing).
+    Raises HTTPException if requirements not met.
+    Rules: >8 characters, at least one uppercase, one lowercase, one digit.
+    """
+    if len(password) <= 8:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be more than 8 characters long."
+        )
+    if not re.search(r'[A-Z]', password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one uppercase letter."
+        )
+    if not re.search(r'[a-z]', password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one lowercase letter."
+        )
+    if not re.search(r'[0-9]', password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one number."
+        )
+
+
+def _verify_with_legacy_fallback(password_hash: str, stored_hash: str) -> bool:
+    """
+    Verify password hash against stored hash.
+    password_hash is always a SHA-256 hex digest (from _decode_password).
+    Returns True if verified, False if not, raises HTTPException for passlib users.
+    """
+    # Legacy plain-text format: TEMP_HASH_<plaintext>
+    if stored_hash.startswith("TEMP_HASH_"):
+        stored_plain = stored_hash[len("TEMP_HASH_"):]
+        return password_hash == hashlib.sha256(stored_plain.encode()).hexdigest()
+
+    # SHA-256 hex: direct comparison
+    if not stored_hash.startswith("$"):
+        return password_hash == stored_hash
+
+    # Legacy passlib sha256_crypt — can't verify with pre-hashed input.
+    # The frontend now sends sha256(password) but passlib needs the original
+    # plain text. These users must reset their password via forgot-password.
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail="PASSWORD_MIGRATION_REQUIRED"
+    )
+
 
 def get_current_user(
     authorization: Optional[str] = Header(None),
@@ -129,6 +189,10 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
     # Decode/process password based on encoding type from frontend
     enc_type = user_data.enc or ''
     plain_password = _decode_password(user_data.password, enc_type)
+
+    # Validate password strength (skip when pre-hashed — hex has no uppercase)
+    if enc_type != 'sha256':
+        _validate_password_strength(plain_password)
 
     # Generate verification code
     code = verification_service.generate_code()
@@ -370,16 +434,13 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
             detail="Invalid email or password"
         )
 
-    # Verify password — try plain first, then SHA-256(plain) for backward
-    # compatibility with accounts registered during the client-side hashing era.
-    password_ok = auth_service.verify_password(plain_password, user.user_password)
-    if not password_ok:
-        sha256_of_plain = hashlib.sha256(plain_password.encode()).hexdigest()
-        password_ok = auth_service.verify_password(sha256_of_plain, user.user_password)
-        if password_ok:
-            # Migrate: re-hash with the plain password so future logins work directly
-            user.user_password = auth_service.hash_password(plain_password)
-            db.commit()
+    # Verify password (plain_password is always SHA-256 hex at this point)
+    password_ok = _verify_with_legacy_fallback(plain_password, user.user_password)
+
+    if password_ok and (user.user_password.startswith("$") or user.user_password.startswith("TEMP_HASH_")):
+        # Migrate legacy hash to SHA-256 hex format
+        user.user_password = plain_password
+        db.commit()
 
     if not password_ok:
         raise HTTPException(
@@ -391,8 +452,11 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is disabled"
+            detail="Account is disabled. Please update your password to meet new security requirements."
         )
+
+    # Check if password update is needed
+    needs_update = getattr(user, 'needs_password_update', False) or False
 
     # Generate token
     access_token, expires_in = auth_service.create_access_token(
@@ -404,6 +468,7 @@ async def login(credentials: UserLogin, db: Session = Depends(get_db)):
         access_token=access_token,
         token_type="bearer",
         expires_in=expires_in,
+        password_update_required=needs_update,
         user=UserResponse(
             id=user.user_id,
             email=user.user_email,
@@ -573,7 +638,11 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
     # Update password
     enc_type = request.enc or ''
     plain_new_password = _decode_password(request.new_password, enc_type)
-    user.user_password = auth_service.hash_password(plain_new_password)
+    if enc_type != 'sha256':
+        _validate_password_strength(plain_new_password)
+    user.user_password = plain_new_password
+    if hasattr(user, 'needs_password_update'):
+        user.needs_password_update = False
     db.commit()
     
     return {"message": "Password has been reset successfully. Please log in with your new password."}
@@ -600,19 +669,22 @@ async def change_password(
     plain_current_password = _decode_password(request.current_password, enc_type)
     plain_new_password = _decode_password(request.new_password, enc_type)
 
-    # Verify current password (try plain, then SHA-256(plain) for backward compat)
-    password_ok = auth_service.verify_password(plain_current_password, current_user.user_password)
-    if not password_ok:
-        sha256_of_plain = hashlib.sha256(plain_current_password.encode()).hexdigest()
-        password_ok = auth_service.verify_password(sha256_of_plain, current_user.user_password)
+    # Verify current password
+    password_ok = _verify_with_legacy_fallback(plain_current_password, current_user.user_password)
     if not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Current password is incorrect"
         )
     
-    # Update password
-    current_user.user_password = auth_service.hash_password(plain_new_password)
+    # Validate new password strength (skip when pre-hashed — frontend validates)
+    if enc_type != 'sha256':
+        _validate_password_strength(plain_new_password)
+    
+    # Update password and clear the update flag
+    current_user.user_password = plain_new_password
+    if hasattr(current_user, 'needs_password_update'):
+        current_user.needs_password_update = False
     db.commit()
     
     return {"message": "Password changed successfully"}

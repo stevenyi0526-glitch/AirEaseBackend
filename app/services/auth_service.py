@@ -3,16 +3,12 @@ AirEase Backend - Authentication Service
 JWT token handling and password hashing
 """
 
+import hashlib
 from datetime import datetime, timedelta
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.config import settings
-
-
-# Password hashing context using sha256_crypt (more compatible than bcrypt)
-pwd_context = CryptContext(schemes=["sha256_crypt"], deprecated="auto")
 
 
 class AuthService:
@@ -23,13 +19,18 @@ class AuthService:
         self.algorithm = settings.jwt_algorithm
         self.access_token_expire_minutes = settings.jwt_expire_minutes
 
-    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
-        """Verify a password against its hash"""
-        return pwd_context.verify(plain_password, hashed_password)
+    def verify_password(self, password_hash: str, stored_hash: str) -> bool:
+        """Direct comparison — both sides are SHA-256 hex digests."""
+        return password_hash == stored_hash
 
-    def hash_password(self, password: str) -> str:
-        """Hash a password for storage"""
-        return pwd_context.hash(password)
+    def hash_password(self, password_hash: str) -> str:
+        """Store the SHA-256 hex digest directly (hashing done by _decode_password)."""
+        return password_hash
+
+    @staticmethod
+    def sha256(text: str) -> str:
+        """Compute SHA-256 hex digest of plain text."""
+        return hashlib.sha256(text.encode()).hexdigest()
 
     def create_access_token(self, user_id: int, email: str) -> tuple[str, int]:
         """

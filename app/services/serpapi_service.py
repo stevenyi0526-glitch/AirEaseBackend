@@ -1194,6 +1194,24 @@ CITY_TO_AIRPORT_CODE = {
     "胡志明": "SGN",
     "hanoi": "HAN",
     "河内": "HAN",
+    # Common airport names (not city names) for robustness
+    "narita": "NRT",
+    "haneda": "HND",
+    "heathrow": "LHR",
+    "gatwick": "LGW",
+    "changi": "SIN",
+    "incheon": "ICN",
+    "suvarnabhumi": "BKK",
+    "kansai": "KIX",
+    "pudong": "PVG",
+    "hongqiao": "SHA",
+    "o'hare": "ORD",
+    "ohare": "ORD",
+    "jfk": "JFK",
+    "lax": "LAX",
+    "cdg": "CDG",
+    "schiphol": "AMS",
+    "fiumicino": "FCO",
 }
 
 # City codes → primary airport codes

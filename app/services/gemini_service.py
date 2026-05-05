@@ -320,18 +320,32 @@ class GeminiService:
         destination_code = ""
         departure_city = ""
         departure_code = ""
-        
+
+        # --- Generic IATA pair detection (e.g. "PAO to HKG", "PAO-HKG", "PAO 到 HKG") ---
+        # This handles any 3-letter IATA code, not just the curated CITY_CODES dict.
+        iata_pair = re.search(
+            r'\b([A-Za-z]{3})\s*(?:to|-|→|->|至|到|、|,|/)\s*([A-Za-z]{3})\b',
+            q,
+            re.IGNORECASE,
+        )
+        if iata_pair:
+            departure_code = iata_pair.group(1).upper()
+            destination_code = iata_pair.group(2).upper()
+            departure_city = CODE_TO_CITY.get(departure_code, departure_code)
+            destination_city = CODE_TO_CITY.get(destination_code, destination_code)
+
         # --- Extract destination: "to <city>" / "fly to <city>" / "去<city>" ---
         # Sort by length descending so "new york" matches before "new"
         sorted_cities = sorted(CITY_CODES.keys(), key=len, reverse=True)
         
         # Pattern: "to <city>"
-        for city in sorted_cities:
-            pattern_to = rf'\bto\s+{re.escape(city)}\b'
-            if re.search(pattern_to, q_lower):
-                destination_code = CITY_CODES[city]
-                destination_city = CODE_TO_CITY.get(destination_code, city.title())
-                break
+        if not destination_code:
+            for city in sorted_cities:
+                pattern_to = rf'\bto\s+{re.escape(city)}\b'
+                if re.search(pattern_to, q_lower):
+                    destination_code = CITY_CODES[city]
+                    destination_city = CODE_TO_CITY.get(destination_code, city.title())
+                    break
         
         # Chinese: "去<city>" / "飞<city>" / "到<city>"
         if not destination_code:
@@ -458,11 +472,11 @@ class GeminiService:
         
         # --- Cabin class ---
         cabin_class = "economy"
-        if any(w in q_lower for w in ["business", "商务", "公务"]):
+        if any(w in q_lower for w in ["business", "商务", "公务", "商務", "公務"]):
             cabin_class = "business"
-        elif any(w in q_lower for w in ["first class", "first", "头等"]):
+        elif any(w in q_lower for w in ["first class", "first", "头等", "頭等"]):
             cabin_class = "first"
-        elif any(w in q_lower for w in ["premium", "premium economy", "超级经济"]):
+        elif any(w in q_lower for w in ["premium", "premium economy", "超级经济", "超級經濟"]):
             cabin_class = "premium_economy"
         
         # --- Sort preference ---
@@ -471,12 +485,12 @@ class GeminiService:
             sort_by = "price"
         elif any(w in q_lower for w in ["fast", "fastest", "quickest", "最快", "快"]):
             sort_by = "duration"
-        elif any(w in q_lower for w in ["comfort", "comfortable", "舒适", "舒服"]):
+        elif any(w in q_lower for w in ["comfort", "comfortable", "舒适", "舒服", "舒適"]):
             sort_by = "comfort"
         
         # --- Stops ---
         stops = "any"
-        if any(w in q_lower for w in ["direct", "nonstop", "non-stop", "直飞"]):
+        if any(w in q_lower for w in ["direct", "nonstop", "non-stop", "直飞", "直飛"]):
             stops = "0"
         elif "1 stop" in q_lower or "one stop" in q_lower:
             stops = "1"
@@ -726,6 +740,28 @@ Respond with JSON only, no explanation:"""
                 raise Exception("No JSON found in response")
 
             parsed = json.loads(json_match.group(0))
+
+            # Post-process: if user typed an explicit IATA pair like "PAO to HKG"
+            # but Gemini didn't recognise the departure code (e.g. PAO is a small
+            # private airport not in its prompt), fill it from the query directly.
+            iata_pair = re.search(
+                r'\b([A-Za-z]{3})\s*(?:to|-|→|->|至|到|、|,|/)\s*([A-Za-z]{3})\b',
+                query,
+                re.IGNORECASE,
+            )
+            if iata_pair:
+                dep = iata_pair.group(1).upper()
+                dst = iata_pair.group(2).upper()
+                if not parsed.get("departure_code"):
+                    parsed["departure_code"] = dep
+                    if not parsed.get("departure_city"):
+                        parsed["departure_city"] = dep
+                if not parsed.get("destination_code"):
+                    parsed["destination_code"] = dst
+                    parsed["has_destination"] = True
+                    if not parsed.get("destination_city"):
+                        parsed["destination_city"] = dst
+
             return parsed
 
         except Exception as e:

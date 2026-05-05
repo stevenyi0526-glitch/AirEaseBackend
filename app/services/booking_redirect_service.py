@@ -96,10 +96,49 @@ class BookingRedirectService:
     """
     
     BASE_URL = "https://serpapi.com/search"
-    
+
+    # In-memory TTL cache for SerpAPI booking_options responses, keyed by
+    # (booking_token, travel_class, hl, currency). The booking_token is
+    # self-contained so the same token always returns the same options.
+    # This avoids re-calling SerpAPI (~10-20s) when the user clicks a
+    # platform from the booking-links menu.
+    _CACHE_TTL_SECONDS = 600  # 10 minutes
+
     def __init__(self):
         self.api_key = settings.serpapi_key
-    
+        # cache: { key: (expires_at_epoch, response_dict) }
+        self._options_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+    def _cache_key(
+        self,
+        booking_token: str,
+        travel_class: Optional[int],
+        hl: str,
+        currency: str,
+    ) -> str:
+        return f"{booking_token}|{travel_class or ''}|{hl}|{currency}"
+
+    def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
+        import time
+        entry = self._options_cache.get(key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if time.time() >= expires_at:
+            self._options_cache.pop(key, None)
+            return None
+        return value
+
+    def _cache_set(self, key: str, value: Dict[str, Any]) -> None:
+        import time
+        # Lightweight eviction: if cache grows too large, drop expired entries
+        if len(self._options_cache) > 256:
+            now = time.time()
+            self._options_cache = {
+                k: v for k, v in self._options_cache.items() if v[0] > now
+            }
+        self._options_cache[key] = (time.time() + self._CACHE_TTL_SECONDS, value)
+
     async def get_booking_options(
         self,
         booking_token: str,
@@ -107,7 +146,9 @@ class BookingRedirectService:
         arrival_id: Optional[str] = None,
         outbound_date: Optional[str] = None,
         return_date: Optional[str] = None,
-        currency: str = "USD"
+        currency: str = "USD",
+        travel_class: Optional[int] = None,
+        hl: str = "en",
     ) -> Dict[str, Any]:
         """
         Fetch booking options from SerpAPI using a booking_token.
@@ -115,6 +156,11 @@ class BookingRedirectService:
         The booking_token is self-contained — it encodes the flight segments,
         trip type, and dates. Per SerpAPI docs: "parameters related to date and
         parameters inside 'Advanced Filters' section won't affect the result."
+        
+        However, travel_class (under "Advanced Google Flights Parameters")
+        DOES affect booking results — it determines the cabin class used in
+        the airline redirect URL (e.g. CABINCLASS=C for business vs Y for
+        economy).
         
         Strategy:
           1. First try with token + minimal context (most reliable)
@@ -128,10 +174,19 @@ class BookingRedirectService:
             outbound_date: Original departure date (YYYY-MM-DD)
             return_date: Optional return date for round trips
             currency: Currency code
+            travel_class: 1=Economy, 2=Premium Economy, 3=Business, 4=First
         
         Returns:
             SerpAPI response containing booking_options
         """
+        # Check cache first — booking_token is self-contained, so the same
+        # token + travel_class + hl + currency always returns the same options.
+        cache_key = self._cache_key(booking_token, travel_class, hl, currency)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            print(f"⚡ Booking: cache HIT for token (saved SerpAPI call)")
+            return cached
+
         # Determine geolocation based on departure airport
         gl = _get_country_code_for_airport(departure_id) if departure_id else "us"
         
@@ -173,10 +228,15 @@ class BookingRedirectService:
             "engine": "google_flights",
             "booking_token": booking_token,
             "api_key": self.api_key,
-            "hl": "en",
+            "hl": hl,
             "gl": gl,
             "currency": currency,
         }
+        
+        # travel_class affects the cabin class in the airline redirect URL
+        # (e.g. CABINCLASS=C for business instead of Y for economy)
+        if travel_class and travel_class in (2, 3, 4):
+            base_params["travel_class"] = str(travel_class)
         
         # Build attempts list — order depends on whether token is combined
         attempts = []
@@ -217,7 +277,7 @@ class BookingRedirectService:
                 attempts.append(("round-trip", roundtrip_params))
         
         data = None
-        async with httpx.AsyncClient(timeout=60.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             for label, params in attempts:
                 try:
                     print(f"🔍 Booking: Trying {label} request (gl={gl}, dep={departure_id})...")
@@ -227,6 +287,7 @@ class BookingRedirectService:
                     
                     if resp_data.get("booking_options"):
                         print(f"✅ Booking: Got {len(resp_data['booking_options'])} options with {label}")
+                        self._cache_set(cache_key, resp_data)
                         return resp_data
                     
                     # HTTP 200 but no booking_options — save and try next
@@ -265,12 +326,15 @@ class BookingRedirectService:
             
             if data and isinstance(data, dict):
                 data["_google_flights_url"] = gf_url
+                self._cache_set(cache_key, data)
                 return data
-            
-            return {
+
+            fallback = {
                 "error": "Booking options unavailable",
                 "_google_flights_url": gf_url
             }
+            self._cache_set(cache_key, fallback)
+            return fallback
     
     def _build_google_flights_url(
         self,

@@ -16,10 +16,56 @@ from app.config import settings
 router = APIRouter(prefix="/v1/booking", tags=["Booking"])
 
 
+def _cabin_to_travel_class(cabin_class: Optional[str]) -> Optional[int]:
+    """Map cabin class string to SerpAPI travel_class integer.
+    
+    Returns None for economy (SerpAPI default) so the param is omitted.
+    """
+    if not cabin_class:
+        return None
+    c = cabin_class.lower().replace(" ", "_")
+    if c in ("premium_economy", "premium economy", "premium"):
+        return 2
+    elif c in ("business", "business_class"):
+        return 3
+    elif c in ("first", "first_class"):
+        return 4
+    return None  # economy or unknown → SerpAPI default
+
+
 # ---------------------------------------------------------------------------
 # Airline deep-link URL builders
 # Each function returns a search URL pre-filled with origin, destination & dates
 # ---------------------------------------------------------------------------
+def _map_cabin_class(cabin: str, airline_format: str) -> str:
+    """
+    Map a generic cabin class value to an airline-specific format.
+
+    Accepted *cabin* values (case-insensitive): economy, premium_economy, business, first.
+    *airline_format* selects the target vocabulary:
+      - "YCJ"    → Y / W / J / F  (IATA fare-class letters, e.g. Cathay, SQ)
+      - "word"   → economy / premium_economy / business / first  (Emirates, Turkish, etc.)
+      - "WORD"   → ECONOMY / PREMIUM_ECONOMY / BUSINESS / FIRST  (KLM, AF)
+      - "ba"     → M / W / J / F  (British Airways cabin codes)
+      - "lh"     → economy / premium_economy / business / first  (Lufthansa travelClass)
+      - "delta"  → MAIN / DPS / BUS / FST  (Delta cabinFare)
+      - "qantas" → economy / premium_economy / business / first
+    Falls back to economy / Y when the value is not recognised.
+    """
+    c = (cabin or "").lower().replace(" ", "_")
+    mapping: dict[str, dict[str, str]] = {
+        "YCJ": {"economy": "Y", "premium_economy": "W", "business": "J", "first": "F"},
+        "word": {"economy": "economy", "premium_economy": "premium_economy", "business": "business", "first": "first"},
+        "WORD": {"economy": "ECONOMY", "premium_economy": "PREMIUM_ECONOMY", "business": "BUSINESS", "first": "FIRST"},
+        "ba": {"economy": "M", "premium_economy": "W", "business": "J", "first": "F"},
+        "delta": {"economy": "MAIN", "premium_economy": "DPS", "business": "BUS", "first": "FST"},
+        "qantas": {"economy": "economy", "premium_economy": "premium_economy", "business": "business", "first": "first"},
+        "emirates": {"economy": "economy", "premium_economy": "premium-economy", "business": "business", "first": "first"},
+    }
+    fmt = mapping.get(airline_format, mapping["word"])
+    return fmt.get(c, list(fmt.values())[0])  # default to first entry (economy)
+
+
 def _build_airline_deep_link(
     airline_code: str,
     airline_name: str,
@@ -27,6 +73,9 @@ def _build_airline_deep_link(
     arrival_id: str,
     outbound_date: str,
     return_date: Optional[str] = None,
+    cabin_class: Optional[str] = None,
+    adults: int = 1,
+    children: int = 0,
 ) -> Optional[str]:
     """
     Build a direct airline website deep-link that pre-fills the flight search
@@ -68,7 +117,7 @@ def _build_airline_deep_link(
 
     # --- Cathay Pacific (CX) ---
     if code == "CX" or "cathay" in name_lower:
-        cabin = "Y"  # Economy
+        cabin = _map_cabin_class(cabin_class, "YCJ") if cabin_class else "Y"  # Economy
         trip = "ROUNDTRIP_SEARCH" if trip_type_rt else "SINGLECITY_SEARCH"
         url = (
             f"https://www.cathaypacific.com/ibe/#/flightSearch"
@@ -109,7 +158,7 @@ def _build_airline_deep_link(
 
     # --- Singapore Airlines (SQ) ---
     if code == "SQ" or "singapore airlines" in name_lower:
-        cabin = "Y"
+        cabin = _map_cabin_class(cabin_class, "YCJ") if cabin_class else "Y"
         trip = "RT" if trip_type_rt else "OW"
         url = (
             f"https://www.singaporeair.com/en_UK/plan-and-book/booking/"
@@ -123,7 +172,7 @@ def _build_airline_deep_link(
                 url += f"&returnDate={ret_dt2.strftime('%d/%m/%Y')}"
             except ValueError:
                 pass
-        url += "&adults=1&children=0&infants=0"
+        url += f"&adults={adults}&children={children}&infants=0"
         return url
 
     # --- Emirates (EK) ---
@@ -136,7 +185,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&returnDate={ret_ymd}"
-        url += "&pax=1:0:0&cabin=economy"
+        url += f"&pax={adults}:{children}:0&cabin={_map_cabin_class(cabin_class, 'emirates') if cabin_class else 'economy'}"
         return url
 
     # --- Qatar Airways (QR) ---
@@ -150,7 +199,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&returning={ret_ymd}"
-        url += "&adults=1&children=0&infants=0&promoCode="
+        url += f"&adults={adults}&children={children}&infants=0&promoCode="
         return url
 
     # --- Korean Air (KE) ---
@@ -219,7 +268,7 @@ def _build_airline_deep_link(
                 url += f"&returnDate={ret_dt2.strftime('%m/%d/%Y')}"
             except ValueError:
                 pass
-        url += "&paxCount=1&cabinFare=MAIN"
+        url += f"&paxCount={adults}&cabinFare={_map_cabin_class(cabin_class, 'delta') if cabin_class else 'MAIN'}"
         return url
 
     # --- United Airlines (UA) ---
@@ -233,7 +282,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&rd={ret_ymd}"
-        url += "&px=1&taxng=1&newHP=True&clm=7&st=bestmatches"
+        url += f"&px={adults}&taxng=1&newHP=True&clm=7&st=bestmatches"
         return url
 
     # --- American Airlines (AA) ---
@@ -247,7 +296,7 @@ def _build_airline_deep_link(
             url += f"&returnDate={ret_ymd}&tripType=roundTrip"
         else:
             url += "&tripType=oneWay"
-        url += "&passengers=1"
+        url += f"&passengers={adults}"
         return url
 
     # --- British Airways (BA) ---
@@ -264,7 +313,7 @@ def _build_airline_deep_link(
                 url += f"&returnDate={ret_dt2.strftime('%d/%m/%Y')}"
             except ValueError:
                 pass
-        url += "&cabinclass=M&adult=1&child=0&infant=0"
+        url += f"&cabinclass={_map_cabin_class(cabin_class, 'ba') if cabin_class else 'M'}&adult={adults}&child={children}&infant=0"
         return url
 
     # --- Lufthansa (LH) ---
@@ -277,7 +326,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&inDate={ret_ymd}"
-        url += "&adults=1&children=0&infants=0&travelClass=economy"
+        url += f"&adults={adults}&children={children}&infants=0&travelClass={_map_cabin_class(cabin_class, 'word') if cabin_class else 'economy'}"
         return url
 
     # --- Air France (AF) ---
@@ -291,7 +340,7 @@ def _build_airline_deep_link(
             url += f"&inboundDate={ret_ymd}&tripType=ROUND_TRIP"
         else:
             url += "&tripType=ONE_WAY"
-        url += "&cabinClass=ECONOMY&pax=1:0:0"
+        url += f"&cabinClass={_map_cabin_class(cabin_class, 'WORD') if cabin_class else 'ECONOMY'}&pax={adults}:{children}:0"
         return url
 
     # --- KLM (KL) ---
@@ -305,7 +354,7 @@ def _build_airline_deep_link(
             url += f"&inboundDate={ret_ymd}&tripType=ROUND_TRIP"
         else:
             url += "&tripType=ONE_WAY"
-        url += "&cabinClass=ECONOMY&pax=1:0:0"
+        url += f"&cabinClass={_map_cabin_class(cabin_class, 'WORD') if cabin_class else 'ECONOMY'}&pax={adults}:{children}:0"
         return url
 
     # --- Etihad (EY) ---
@@ -319,7 +368,7 @@ def _build_airline_deep_link(
             url += f"&return={ret_ymd}&tripType=return"
         else:
             url += "&tripType=oneWay"
-        url += "&adults=1&children=0&infants=0"
+        url += f"&adults={adults}&children={children}&infants=0"
         return url
 
     # --- Qantas (QF) ---
@@ -331,7 +380,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&return={ret_ymd}"
-        url += "&adults=1&children=0&infants=0&className=economy"
+        url += f"&adults={adults}&children={children}&infants=0&className={_map_cabin_class(cabin_class, 'qantas') if cabin_class else 'economy'}"
         return url
 
     # --- Air Canada (AC) ---
@@ -344,7 +393,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&departDate1={ret_ymd}"
-        url += "&ADT=1&YTH=0&CHD=0&INF=0&marketCode=INT"
+        url += f"&ADT={adults}&YTH=0&CHD={children}&INF=0&marketCode=INT"
         return url
 
     # --- Vietnam Airlines (VN) ---
@@ -370,7 +419,7 @@ def _build_airline_deep_link(
             url += f"&returnDate={ret_ymd}&journeyType=RT"
         else:
             url += "&journeyType=OW"
-        url += "&adult=1&child=0&infant=0&cabinClass=economy"
+        url += f"&adult={adults}&child={children}&infant=0&cabinClass={_map_cabin_class(cabin_class, 'word') if cabin_class else 'economy'}"
         return url
 
     # --- Asiana Airlines (OZ) ---
@@ -407,7 +456,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&returnDate={ret_ymd}"
-        url += "&ADT=1&CHD=0&INF=0"
+        url += f"&ADT={adults}&CHD={children}&INF=0"
         return url
 
     # --- Peach Aviation (MM) ---
@@ -432,7 +481,7 @@ def _build_airline_deep_link(
         )
         if trip_type_rt and ret_ymd:
             url += f"&returnDate={ret_ymd}"
-        url += "&adults=1&children=0&infants=0"
+        url += f"&adults={adults}&children={children}&infants=0"
         return url
 
     # Not supported — return None
@@ -633,7 +682,18 @@ async def redirect_to_booking(
     prefer_expedia: bool = Query(
         False,
         description="If True, prefer Expedia as the booking provider (for mixed-airline bookings). Falls back to first available option if Expedia is not listed."
-    )
+    ),
+    currency: Optional[str] = Query(
+        None,
+        description="Currency code for booking prices (e.g., 'HKD', 'USD', 'EUR')"
+    ),
+    cabin_class: Optional[str] = Query(
+        None,
+        description="Cabin class: economy, premium_economy, business, first"
+    ),
+    adults: int = Query(1, description="Number of adult passengers"),
+    children: int = Query(0, description="Number of child passengers"),
+    hl: str = Query("en", description="Language for booking redirect (e.g. en, zh-TW, ja)"),
 ):
     """
     Redirect user to airline booking page.
@@ -674,7 +734,10 @@ async def redirect_to_booking(
             departure_id=departure_id,
             arrival_id=arrival_id,
             outbound_date=outbound_date,
-            return_date=return_date
+            return_date=return_date,
+            currency=currency or "USD",
+            travel_class=_cabin_to_travel_class(cabin_class),
+            hl=hl,
         )
         
         # Check for API errors
@@ -783,7 +846,7 @@ async def redirect_to_booking(
             )
         
         url, post_data = booking_details
-        
+
         # Step 5: Generate redirect HTML
         redirect_html = booking_redirect_service.generate_redirect_html(
             url=url,
@@ -839,7 +902,12 @@ async def get_booking_options(
     return_date: Optional[str] = Query(
         None,
         description="Return date for round trips (YYYY-MM-DD)"
-    )
+    ),
+    cabin_class: Optional[str] = Query(
+        None,
+        description="Cabin class: economy, premium_economy, business, first"
+    ),
+    hl: str = Query("en", description="Language for booking redirect (e.g. en, zh-TW, ja)"),
 ):
     """
     Get all booking options for a flight.
@@ -867,7 +935,9 @@ async def get_booking_options(
             departure_id=departure_id,
             arrival_id=arrival_id,
             outbound_date=outbound_date,
-            return_date=return_date
+            return_date=return_date,
+            travel_class=_cabin_to_travel_class(cabin_class),
+            hl=hl,
         )
         
         if "error" in response:
@@ -909,6 +979,11 @@ async def get_booking_links(
     return_date: Optional[str] = Query(None, description="Return date YYYY-MM-DD"),
     airline_name: Optional[str] = Query(None, description="Airline name for labelling"),
     airline_code: Optional[str] = Query(None, description="IATA airline code (e.g. CX, JL)"),
+    cabin_class: Optional[str] = Query(None, description="Cabin class: economy, premium_economy, business, first"),
+    adults: int = Query(1, description="Number of adult passengers"),
+    children: int = Query(0, description="Number of child passengers"),
+    currency: Optional[str] = Query(None, description="Currency code (e.g. HKD, USD, EUR)"),
+    hl: str = Query("en", description="Language for booking redirect (e.g. en, zh-TW, ja)"),
 ):
     """
     Returns a list of booking platforms with redirect URLs.
@@ -930,6 +1005,9 @@ async def get_booking_links(
             arrival_id=arrival_id,
             outbound_date=outbound_date,
             return_date=return_date,
+            currency=currency or "USD",
+            travel_class=_cabin_to_travel_class(cabin_class),
+            hl=hl,
         )
 
         booking_options = serpapi_response.get("booking_options", [])
@@ -973,6 +1051,10 @@ async def get_booking_links(
                 redirect_params["outbound_date"] = outbound_date
             if return_date:
                 redirect_params["return_date"] = return_date
+            if cabin_class:
+                redirect_params["cabin_class"] = cabin_class
+            if hl and hl != "en":
+                redirect_params["hl"] = hl
 
             redirect_url = f"{base_url}/v1/booking/redirect-by-index?{urlencode(redirect_params)}"
 
@@ -984,58 +1066,12 @@ async def get_booking_links(
                 "logoHint": book_with.lower().split()[0],  # first word lowercase
             })
 
-        # Augment with well-known travel agency search links so the user
-        # always has multiple booking options (SerpAPI sometimes only returns 1)
-        seen_lower = {n.lower() for n in seen_names}
-        fallback_agencies = _build_fallback_agency_links(
-            departure_id, arrival_id, outbound_date, return_date
-        )
-        for agency in fallback_agencies:
-            if agency["name"].lower() not in seen_lower:
-                links.append(agency)
-                seen_lower.add(agency["name"].lower())
-
-        # --- Airline Direct Deep-link ---
-        # Try to build a direct airline website link pre-filled with flight details
-        # so users land on the search results page, not the homepage.
-        resolved_code = airline_code or ""
-        if not resolved_code and airline_name:
-            resolved_code = _airline_name_to_code(airline_name)
-        # Also try to detect from the SerpAPI book_with names
-        if not resolved_code:
-            for link in links:
-                if link.get("isAirline"):
-                    resolved_code = _airline_name_to_code(link["name"])
-                    if resolved_code:
-                        break
-
-        if resolved_code and departure_id and arrival_id and outbound_date:
-            # Always prefer the airline_name passed from the frontend (user's selected airline)
-            # Do NOT override with SerpAPI airline name – SerpAPI may return a different carrier
-            deep_link_name = airline_name or resolved_code
-
-            deep_url = _build_airline_deep_link(
-                airline_code=resolved_code,
-                airline_name=deep_link_name,
-                departure_id=departure_id,
-                arrival_id=arrival_id,
-                outbound_date=outbound_date,
-                return_date=return_date,
-            )
-            if deep_url:
-                direct_label = f"{deep_link_name} (Direct)"
-                if direct_label.lower() not in seen_lower:
-                    links.insert(0, {
-                        "name": direct_label,
-                        "url": deep_url,
-                        "price": None,
-                        "isAirline": True,
-                        "logoHint": deep_link_name.lower().split()[0],
-                    })
-                    seen_lower.add(direct_label.lower())
-                    print(f"✈️  Added airline direct deep-link: {deep_link_name} → {deep_url[:80]}...")
-
-        print(f"📋 booking-links: returning {len(links)} total links (SerpAPI + agencies + direct)")
+        # Only return platforms that SerpAPI / Google Flights actually offers
+        # for this booking_token. Hardcoded agency search-page fallbacks
+        # (Expedia, Trip.com, Kayak, Skyscanner, etc.) were removed because
+        # those URLs frequently 404 — the platforms don't actually carry
+        # the specific itinerary, so the link leads nowhere useful.
+        print(f"📋 booking-links: returning {len(links)} SerpAPI-backed links")
 
         return {"links": links}
 
@@ -1057,6 +1093,8 @@ async def redirect_by_index(
     arrival_id: Optional[str] = Query(None),
     outbound_date: Optional[str] = Query(None),
     return_date: Optional[str] = Query(None),
+    cabin_class: Optional[str] = Query(None, description="Cabin class: economy, premium_economy, business, first"),
+    hl: str = Query("en", description="Language for booking redirect (e.g. en, zh-TW, ja)"),
 ):
     """Redirect to a specific booking platform by its index in booking_options."""
     if not settings.serpapi_key:
@@ -1074,6 +1112,8 @@ async def redirect_by_index(
             arrival_id=arrival_id,
             outbound_date=outbound_date,
             return_date=return_date,
+            travel_class=_cabin_to_travel_class(cabin_class),
+            hl=hl,
         )
 
         booking_options = serpapi_response.get("booking_options", [])

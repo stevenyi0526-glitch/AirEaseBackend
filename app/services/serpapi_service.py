@@ -271,18 +271,47 @@ class SerpAPIFlightService:
             params["travel_class"] = travel_class
         if adults > 1:
             params["adults"] = adults
-        
-        async with httpx.AsyncClient() as client:
-            response = await client.get(self.BASE_URL, params=params, timeout=30.0)
-            data = response.json()
-        
-        # Log the raw response for debugging
-        best_count = len(data.get("best_flights", []))
-        other_count = len(data.get("other_flights", []))
-        error_info = data.get("error")
-        print(f"[ReturnFlights] departure_token response: best_flights={best_count}, other_flights={other_count}, error={error_info}")
+
+        # Call SerpAPI with up to 2 retries when result is empty
+        # (SerpAPI sometimes returns empty best_flights/other_flights on first
+        # call due to upstream Google Flights latency; retrying after a short
+        # delay typically yields results.)
+        import asyncio
+        max_attempts = 3
+        retry_delay_seconds = 1.5
+        data: Dict[str, Any] = {}
+        best_count = 0
+        other_count = 0
+        for attempt in range(1, max_attempts + 1):
+            async with httpx.AsyncClient() as client:
+                response = await client.get(self.BASE_URL, params=params, timeout=30.0)
+                data = response.json()
+
+            best_count = len(data.get("best_flights", []))
+            other_count = len(data.get("other_flights", []))
+            error_info = data.get("error")
+            print(
+                f"[ReturnFlights] attempt {attempt}/{max_attempts}: "
+                f"best_flights={best_count}, other_flights={other_count}, error={error_info}"
+            )
+
+            # If we got results OR a hard API error, stop retrying
+            if best_count + other_count > 0 or error_info:
+                break
+
+            # Empty result — log and retry after a short delay
+            if attempt < max_attempts:
+                print(
+                    f"[ReturnFlights] ⚠️ Empty result on attempt {attempt}; "
+                    f"retrying in {retry_delay_seconds}s..."
+                )
+                await asyncio.sleep(retry_delay_seconds)
+
         if best_count == 0 and other_count == 0:
-            print(f"[ReturnFlights] ⚠️ No return flights found for departure_token. Raw keys: {list(data.keys())}")
+            print(
+                f"[ReturnFlights] ⚠️ No return flights found after {max_attempts} attempts. "
+                f"Raw keys: {list(data.keys())}"
+            )
         
         # Determine cabin filter
         cabin_map = {1: "economy", 2: "premium economy", 3: "business", 4: "first"}

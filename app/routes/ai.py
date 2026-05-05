@@ -3,12 +3,14 @@ AirEase Backend - AI Search API Routes
 AI智能搜索API路由
 """
 
+import re
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 
 from app.models import AISearchRequest, AISearchResponse
 from app.services.gemini_service import gemini_service
+from app.services.airport_resolver import resolve_to_iata
 
 router = APIRouter(prefix="/v1/ai", tags=["AI Search"])
 
@@ -144,11 +146,90 @@ async def parse_query(request: ParseQueryRequest):
     """
     try:
         result = await gemini_service.parse_natural_language_query(request.query)
-        return result
     except Exception as e:
         # Instead of returning 500, use local fallback parser
         print(f"AI parse_query falling back to local parser: {e}")
-        return gemini_service._local_parse_natural_language(request.query)
+        result = gemini_service._local_parse_natural_language(request.query)
+
+    # Post-process: resolve any unresolved departure / destination by querying
+    # the airports DB. Handles small/private airports (e.g. "palo alto airport"
+    # → PAO), CJK city names (e.g. "舊金山" → SFO) and misspellings
+    # (e.g. "francicso" → SFO) that the LLM either skipped or got wrong.
+    _enrich_with_airport_resolver(request.query, result)
+    return result
+
+
+# Match "from X to Y" / "from X going to Y" / Chinese 从X到Y.
+# Uses [^\s] sequences so any Unicode (incl. CJK) is captured without `regex` lib.
+_FROM_TO_EN_RE = re.compile(
+    r"\b(?:from|departing\s+from|leaving\s+from)\s+"
+    r"([\S][\S\s]{0,40}?)"
+    r"\s+(?:to|going\s+to|→|->)\s+"
+    r"([\S][\S\s]{0,40}?)"
+    r"(?:\s+(?:on|next|tomorrow|today|in|the)\b|[?.!,]|$)",
+    re.IGNORECASE,
+)
+_FROM_TO_CN_RE = re.compile(
+    r"(?:从|從|出發於|出发于)\s*([\u4e00-\u9fff]+?)\s*(?:到|至|往|去|飛|飞|→|->)\s*([\u4e00-\u9fff]+)"
+)
+_TO_ONLY_EN_RE = re.compile(
+    r"(?:^|\s)(?:to|going\s+to|fly\s+to)\s+"
+    r"([A-Za-z][A-Za-z0-9\s'.\-]{1,40}?)"
+    r"(?:\s+(?:on|next|tomorrow|today|in|the)\b|[?.!,]|$)",
+    re.IGNORECASE,
+)
+_TO_ONLY_CN_RE = re.compile(
+    # Match "去/到/往/至 + (CJK city name)" anywhere in the query, including
+    # immediately after another CJK char (e.g. "明天去東京"). The captured
+    # group is greedy CJK chars; the airport resolver does longest-substring
+    # CJK→English mapping, so trailing modifiers like "最便宜的商務直飛航班"
+    # are tolerated.
+    r"(?:去|到|往|至|飛去|飞去|飛往|飞往)\s*([\u4e00-\u9fff]+)"
+)
+
+
+def _extract_from_to(query: str):
+    """Pull user-typed origin/destination phrases out of the raw query.
+    Returns (from_str | None, to_str | None)."""
+    # Chinese 从X到Y first (more specific)
+    m = _FROM_TO_CN_RE.search(query)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    m = _FROM_TO_EN_RE.search(query)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    m = _TO_ONLY_CN_RE.search(query)
+    if m:
+        return None, m.group(1).strip()
+    m = _TO_ONLY_EN_RE.search(query)
+    if m:
+        return None, m.group(1).strip()
+    return None, None
+
+
+def _enrich_with_airport_resolver(query: str, result: dict) -> None:
+    """Mutates `result` in place. Tries to fill missing departure / destination
+    codes using the airports DB."""
+    user_from, user_to = _extract_from_to(query)
+
+    # Departure
+    if not result.get("departure_code"):
+        candidate = user_from or result.get("departure_city") or ""
+        if candidate.strip():
+            resolved = resolve_to_iata(candidate)
+            if resolved:
+                result["departure_code"] = resolved[0]
+                result["departure_city"] = resolved[1]
+
+    # Destination
+    if not result.get("destination_code"):
+        candidate = user_to or result.get("destination_city") or ""
+        if candidate.strip():
+            resolved = resolve_to_iata(candidate)
+            if resolved:
+                result["destination_code"] = resolved[0]
+                result["destination_city"] = resolved[1]
+                result["has_destination"] = True
 
 
 @router.post(

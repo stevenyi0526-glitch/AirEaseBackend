@@ -327,3 +327,71 @@ async def find_nearest_airport(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/nearby/{iata_code}",
+    response_model=List[AirportCoordinates],
+    summary="Find nearby airports by IATA code",
+    description="Find a list of public airports near the given IATA code (excluding itself). "
+                "Useful when a search returns no flights and we want to suggest alternatives."
+)
+async def find_nearby_airports_by_code(
+    iata_code: str,
+    limit: int = Query(5, ge=1, le=20, description="Max number of nearby airports to return"),
+    max_distance_km: float = Query(300, description="Maximum distance in km")
+):
+    """
+    Given an IATA code, return up to `limit` of the closest large/medium
+    airports, excluding the input airport itself. This lets the frontend
+    suggest alternatives when the original airport has no available flights
+    (e.g. private/closed airports like PAO).
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                a.iata_code, a.name, a.municipality, a.iso_country,
+                a.latitude_deg, a.longitude_deg,
+                (6371 * acos(
+                    cos(radians(s.latitude_deg)) * cos(radians(a.latitude_deg)) *
+                    cos(radians(a.longitude_deg) - radians(s.longitude_deg)) +
+                    sin(radians(s.latitude_deg)) * sin(radians(a.latitude_deg))
+                )) AS distance_km
+            FROM airports a, airports s
+            WHERE UPPER(s.iata_code) = UPPER(%s)
+              AND s.latitude_deg IS NOT NULL
+              AND s.longitude_deg IS NOT NULL
+              AND UPPER(a.iata_code) != UPPER(s.iata_code)
+              AND a.type IN ('large_airport', 'medium_airport')
+              AND a.latitude_deg IS NOT NULL
+              AND a.longitude_deg IS NOT NULL
+              AND a.iata_code IS NOT NULL
+              AND a.iata_code != ''
+            ORDER BY distance_km
+            LIMIT %s
+        """, (iata_code, limit))
+
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+
+        results = []
+        for row in rows:
+            if row[6] is not None and row[6] > max_distance_km:
+                continue
+            results.append(AirportCoordinates(
+                iataCode=row[0],
+                name=row[1],
+                municipality=row[2],
+                country=row[3],
+                latitude=float(row[4]) if row[4] else 0,
+                longitude=float(row[5]) if row[5] else 0,
+            ))
+        return results
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

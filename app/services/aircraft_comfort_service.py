@@ -437,14 +437,29 @@ class AircraftComfortService:
             if is_business:
                 pitch_positive = seat_pitch >= 60
                 pitch_desc = "above average" if pitch_positive else "standard"
+                pitch_qual_key = "scoreExplain.qualifier.aboveAverage" if pitch_positive else "scoreExplain.qualifier.standard"
             else:
                 pitch_positive = seat_pitch >= 32
-                pitch_desc = "above average" if pitch_positive else ("standard" if seat_pitch >= 31 else "below average")
+                if seat_pitch >= 32:
+                    pitch_desc = "above average"
+                    pitch_qual_key = "scoreExplain.qualifier.aboveAverage"
+                elif seat_pitch >= 31:
+                    pitch_desc = "standard"
+                    pitch_qual_key = "scoreExplain.qualifier.standard"
+                else:
+                    pitch_desc = "below average"
+                    pitch_qual_key = "scoreExplain.qualifier.belowAverage"
             
             explanations.append({
                 "title": "Seat Pitch (Legroom)",
                 "detail": f"{seat_pitch} inches - {pitch_desc} for {cabin_class}",
-                "is_positive": pitch_positive
+                "is_positive": pitch_positive,
+                "i18n_key": "scoreExplain.seatPitch",
+                "i18n_params": {
+                    "inches": seat_pitch,
+                    "qualityKey": pitch_qual_key,
+                    "cabinKey": f"scoreExplain.cabin.{cabin_class}",
+                },
             })
             
             # Seat width explanation
@@ -453,7 +468,12 @@ class AircraftComfortService:
             explanations.append({
                 "title": "Seat Width",
                 "detail": f"{seat_width} inches - {'wider than' if width_positive else 'narrower than'} average",
-                "is_positive": width_positive
+                "is_positive": width_positive,
+                "i18n_key": "scoreExplain.seatWidth",
+                "i18n_params": {
+                    "inches": seat_width,
+                    "qualityKey": "scoreExplain.qualifier.widerThan" if width_positive else "scoreExplain.qualifier.narrowerThan",
+                },
             })
             
             # IFE screen explanation
@@ -463,14 +483,21 @@ class AircraftComfortService:
                 explanations.append({
                     "title": "Entertainment Screen",
                     "detail": f"{ife_screen}-inch display - {'larger than' if ife_positive else 'smaller than'} average",
-                    "is_positive": ife_positive
+                    "is_positive": ife_positive,
+                    "i18n_key": "scoreExplain.ifeScreen",
+                    "i18n_params": {
+                        "inches": ife_screen,
+                        "qualityKey": "scoreExplain.qualifier.largerThan" if ife_positive else "scoreExplain.qualifier.smallerThan",
+                    },
                 })
         else:
             # No specific aircraft data
             explanations.append({
                 "title": "Seat Comfort",
                 "detail": f"Standard seating for {cabin_class}",
-                "is_positive": comfort_score >= 7.0
+                "is_positive": comfort_score >= 7.0,
+                "i18n_key": "scoreExplain.seatComfortStandard",
+                "i18n_params": {"cabinKey": f"scoreExplain.cabin.{cabin_class}"},
             })
         
         # Aircraft type explanation (wide-body vs narrow-body)
@@ -481,7 +508,9 @@ class AircraftComfortService:
                 explanations.append({
                     "title": "Wide-body Aircraft",
                     "detail": f"{aircraft_model} offers a more spacious cabin with lower noise levels",
-                    "is_positive": True
+                    "is_positive": True,
+                    "i18n_key": "scoreExplain.wideBody",
+                    "i18n_params": {"aircraft": aircraft_model},
                 })
         
         return explanations

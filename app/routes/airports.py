@@ -8,6 +8,12 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 import psycopg2
 from app.config import settings
+from app.services.international_airports import (
+    apply_hardcoded_remap,
+    is_international,
+    international_iata_list,
+    find_nearest_international_airport_sql,
+)
 
 router = APIRouter(prefix="/v1/airports", tags=["airports"])
 
@@ -267,11 +273,16 @@ async def find_nearest_airport(
 ):
     """
     Find the nearest airport to given GPS coordinates.
-    Uses Haversine formula to calculate distance.
-    Only returns large/medium airports within the same city/region.
-    
-    Returns:
-        The nearest airport with coordinates
+
+    Pipeline (this is what flight search actually wants — see request from
+    product team to map any tiny/regional airport such as PAO -> SFO):
+        1. Find the closest large/medium airport via Haversine.
+        2. Apply hardcoded remap (e.g. PAO -> SFO) if any.
+        3. If the resulting IATA code is not in our curated list of
+           international airports, snap to the nearest international airport
+           instead.
+
+    Returns the resolved airport with coordinates.
     """
     try:
         conn = get_db_connection()
@@ -298,31 +309,69 @@ async def find_nearest_airport(
         """, (lat, lng, lat))
         
         results = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        
+
         if not results:
+            cursor.close()
+            conn.close()
             raise HTTPException(status_code=404, detail="No airports found nearby")
-        
-        # Return the closest airport
+
+        # Step 1: closest physical airport
         row = results[0]
         distance = row[6]
-        
+
         if distance > max_distance_km:
+            cursor.close()
+            conn.close()
             raise HTTPException(
-                status_code=404, 
+                status_code=404,
                 detail=f"No airports found within {max_distance_km}km"
             )
-        
+
+        nearest_code = row[0]
+
+        # Step 2: hardcoded remap (e.g. PAO -> SFO)
+        remapped_code = apply_hardcoded_remap(nearest_code)
+
+        # Step 3: if remapped code is international, fetch its row; otherwise
+        # snap to the nearest international airport.
+        final_row = None
+
+        if remapped_code != nearest_code:
+            cursor.execute("""
+                SELECT iata_code, name, municipality, iso_country,
+                       latitude_deg, longitude_deg
+                FROM airports
+                WHERE iata_code = %s
+                LIMIT 1
+            """, (remapped_code,))
+            final_row = cursor.fetchone()
+
+        if final_row is None and not is_international(remapped_code):
+            cursor.execute(
+                find_nearest_international_airport_sql(),
+                (lat, lng, lat, list(international_iata_list())),
+            )
+            intl_row = cursor.fetchone()
+            if intl_row is not None:
+                final_row = intl_row[:6]  # drop distance_km column
+
+        if final_row is None:
+            # Either remap target is international (already in DB row[0..5]) or
+            # the original row was already international — use the original row.
+            final_row = row[:6]
+
+        cursor.close()
+        conn.close()
+
         return AirportCoordinates(
-            iataCode=row[0],
-            name=row[1],
-            municipality=row[2],
-            country=row[3],
-            latitude=float(row[4]) if row[4] else 0,
-            longitude=float(row[5]) if row[5] else 0
+            iataCode=final_row[0],
+            name=final_row[1],
+            municipality=final_row[2],
+            country=final_row[3],
+            latitude=float(final_row[4]) if final_row[4] else 0,
+            longitude=float(final_row[5]) if final_row[5] else 0,
         )
-        
+
     except HTTPException:
         raise
     except Exception as e:

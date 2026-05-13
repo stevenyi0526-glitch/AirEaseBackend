@@ -31,6 +31,38 @@ class SerpAPIFlightService:
     """
     
     BASE_URL = "https://serpapi.com/search"
+
+    # Currency → (gl, hl) mapping. Google Flights returns DIFFERENT inventory per
+    # region (regional carriers, codeshares, fare buckets), so to match what the
+    # user actually sees on google.com/travel/flights from their locale we MUST
+    # send the right gl/hl. Hard-coding gl=us hides regional carriers (e.g.
+    # StarLux/Tigerair from TPE→NRT for TWD users).
+    _CURRENCY_LOCALE: Dict[str, tuple] = {
+        "USD": ("us", "en"),
+        "CNY": ("cn", "zh-CN"),
+        "HKD": ("hk", "zh-HK"),
+        "TWD": ("tw", "zh-TW"),
+        "JPY": ("jp", "ja"),
+        "KRW": ("kr", "ko"),
+        "SGD": ("sg", "en"),
+        "THB": ("th", "th"),
+        "MYR": ("my", "en"),
+        "PHP": ("ph", "en"),
+        "IDR": ("id", "id"),
+        "VND": ("vn", "vi"),
+        "INR": ("in", "en"),
+        "GBP": ("uk", "en"),
+        "EUR": ("de", "en"),
+        "AUD": ("au", "en"),
+        "NZD": ("nz", "en"),
+        "CAD": ("ca", "en"),
+    }
+
+    @classmethod
+    def _resolve_locale(cls, currency: str, gl: Optional[str], hl: Optional[str]) -> tuple:
+        """Return (gl, hl) honoring explicit overrides; else derive from currency."""
+        default_gl, default_hl = cls._CURRENCY_LOCALE.get((currency or "USD").upper(), ("us", "en"))
+        return (gl or default_gl, hl or default_hl)
     
     # Cache for storing flight results by ID (for detail page retrieval)
     # Format: { flight_id: FlightWithScore }
@@ -55,9 +87,10 @@ class SerpAPIFlightService:
         return_date: Optional[str] = None,
         travel_class: int = 1,  # 1=Economy, 2=Premium Economy, 3=Business, 4=First
         adults: int = 1,
+        children: int = 0,  # Bug 2548095: forward to SerpAPI for child fare pricing
         currency: str = "USD",
-        hl: str = "en",
-        gl: str = "us",
+        hl: Optional[str] = None,
+        gl: Optional[str] = None,
         stops: Optional[int] = None,  # 0=Any, 1=Nonstop, 2=1 stop or fewer, 3=2 stops or fewer
         deep_search: bool = True,  # Enable for browser-identical results with more flights
         show_hidden: bool = True,  # Include hidden flight results for more options
@@ -105,19 +138,29 @@ class SerpAPIFlightService:
                 # Default: use Google's top flights ranking
                 sort_by = self.SORT_BY_TOP_FLIGHTS
         
+        # Resolve gl/hl from currency when not explicitly given so SerpAPI returns
+        # the SAME regional inventory the user would see on Google Flights from
+        # their locale (Google personalises flight inventory per region).
+        resolved_gl, resolved_hl = self._resolve_locale(currency, gl, hl)
+
         params = {
             "engine": "google_flights",
             "departure_id": departure_id,
             "arrival_id": arrival_id,
             "outbound_date": outbound_date,
             "currency": currency,
-            "hl": hl,
-            "gl": gl,
+            "hl": resolved_hl,
+            "gl": resolved_gl,
             "adults": adults,
             "travel_class": travel_class,
             "sort_by": sort_by,  # Add sort_by to API call
             "api_key": self.api_key,
         }
+
+        # Bug 2548095: include children only when > 0 so SerpAPI returns the
+        # adjusted family fare (child fares are typically discounted vs adults).
+        if children and children > 0:
+            params["children"] = children
         
         # Flight type: 1=Round trip, 2=One way
         if return_date:
@@ -180,6 +223,25 @@ class SerpAPIFlightService:
             except Exception as e:
                 print(f"Error parsing flight {idx}: {e}")
                 continue
+
+        # Bug 2548143: STRICT cabin enforcement. SerpAPI's travel_class param
+        # is a hint — the response may still mix in flights of other cabin
+        # classes. Drop any flight whose first-segment cabin does not match
+        # what the user explicitly asked for. We compare on a normalized
+        # lower-case form so "Premium economy" / "PREMIUM_ECONOMY" /
+        # "premium-economy" all collapse to the same key.
+        def _normalize_cabin(value: str) -> str:
+            return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+        target_cabin = _normalize_cabin(cabin_filter)
+        if target_cabin and target_cabin != "any":
+            before = len(parsed_flights_data)
+            parsed_flights_data = [
+                (fws, fd) for (fws, fd) in parsed_flights_data
+                if _normalize_cabin(fws.flight.cabin) == target_cabin
+            ]
+            if before != len(parsed_flights_data):
+                print(f"[cabin-filter] dropped {before - len(parsed_flights_data)} non-{target_cabin} flights")
         
         # Find the SHORTEST flight duration for this route
         # This will be used as the baseline (10/10) for efficiency scoring
@@ -237,6 +299,7 @@ class SerpAPIFlightService:
         departure_token: str,
         travel_class: int = 1,
         adults: int = 1,
+        children: int = 0,  # Bug 2548095
         currency: str = "USD",
         traveler_type: str = "default"
     ) -> List[FlightWithScore]:
@@ -251,6 +314,8 @@ class SerpAPIFlightService:
         Returns:
             List of return flight options with combined round trip prices
         """
+        # Match Google Flights regional inventory by deriving gl/hl from currency.
+        return_gl, return_hl = self._resolve_locale(currency, None, None)
         params = {
             "engine": "google_flights",
             "api_key": self.api_key,
@@ -260,8 +325,8 @@ class SerpAPIFlightService:
             "return_date": return_date,
             "type": "1",  # Round trip
             "currency": currency,
-            "hl": "en",
-            "gl": "us",
+            "hl": return_hl,
+            "gl": return_gl,
             "departure_token": departure_token,
             "deep_search": "true",    # Get more complete results
             "show_hidden": "true",    # Include hidden flight options
@@ -271,6 +336,9 @@ class SerpAPIFlightService:
             params["travel_class"] = travel_class
         if adults > 1:
             params["adults"] = adults
+        # Bug 2548095
+        if children and children > 0:
+            params["children"] = children
 
         # Call SerpAPI with up to 2 retries when result is empty
         # (SerpAPI sometimes returns empty best_flights/other_flights on first
@@ -449,7 +517,17 @@ class SerpAPIFlightService:
         airline_logo = first_segment.get("airline_logo", "")
         flight_number = first_segment.get("flight_number", f"XX{index+1000}")
         airplane = first_segment.get("airplane", "Unknown Aircraft")
-        travel_class = first_segment.get("travel_class", "Economy")
+        # Bug 2548171: SerpAPI 不一定每个 segment 都返回 travel_class，缺失时
+        # 默认 "Economy"。但如果用户已经指定了非经济舱（cabin_filter 来自
+        # 前端 cabin 参数），应当回落到该舱位字面值，避免头等舱搜索结果
+        # 全部显示成经济舱。
+        raw_travel_class = first_segment.get("travel_class")
+        if raw_travel_class:
+            travel_class = raw_travel_class
+        elif cabin_filter and cabin_filter.lower() != "economy":
+            travel_class = cabin_filter.title()
+        else:
+            travel_class = "Economy"
         
         # Extract legroom — check all segments and extensions for the best data
         legroom = ""
@@ -1010,7 +1088,9 @@ class SerpAPIFlightService:
                 title=exp["title"],
                 detail=exp["detail"],
                 is_positive=exp["is_positive"],
-                cabin_class=cabin_class.lower() if "economy" in cabin_class.lower() else "business"
+                cabin_class=cabin_class.lower() if "economy" in cabin_class.lower() else "business",
+                i18n_key=exp.get("i18n_key"),
+                i18n_params=exp.get("i18n_params"),
             ))
         
         # Add service explanations from airline reviews
@@ -1026,7 +1106,9 @@ class SerpAPIFlightService:
                 title=exp["title"],
                 detail=exp["detail"],
                 is_positive=exp["is_positive"],
-                cabin_class=cabin_class.lower() if "economy" in cabin_class.lower() else "business"
+                cabin_class=cabin_class.lower() if "economy" in cabin_class.lower() else "business",
+                i18n_key=exp.get("i18n_key"),
+                i18n_params=exp.get("i18n_params"),
             ))
         
         explanations.append(
@@ -1336,10 +1418,11 @@ class SerpAPIPriceInsightsService:
         outbound_date: str,
         return_date: Optional[str] = None,
         currency: str = "USD",
-        hl: str = "en",
-        gl: str = "us",
+        hl: Optional[str] = None,
+        gl: Optional[str] = None,
         travel_class: int = 1,
-        adults: int = 1
+        adults: int = 1,
+        children: int = 0  # Bug 2548095
     ) -> Dict[str, Any]:
         """
         Get price insights for a flight route.
@@ -1371,18 +1454,26 @@ class SerpAPIPriceInsightsService:
         if not self.api_key:
             raise ValueError("SERPAPI_KEY not configured")
         
+        # Resolve gl/hl from currency — keeps insights aligned with the user's
+        # actual Google Flights region (see SerpAPIFlightService._resolve_locale).
+        resolved_gl, resolved_hl = SerpAPIFlightService._resolve_locale(currency, gl, hl)
+
         params = {
             "engine": "google_flights",
             "departure_id": departure_id,
             "arrival_id": arrival_id,
             "outbound_date": outbound_date,
             "currency": currency,
-            "hl": hl,
-            "gl": gl,
+            "hl": resolved_hl,
+            "gl": resolved_gl,
             "travel_class": travel_class,
             "adults": adults,
             "api_key": self.api_key,
         }
+
+        # Bug 2548095
+        if children and children > 0:
+            params["children"] = children
         
         # Set trip type
         if return_date:

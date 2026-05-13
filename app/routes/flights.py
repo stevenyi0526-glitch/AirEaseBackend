@@ -57,6 +57,7 @@ async def search_flights(
     cabin: str = Query("economy", description="舱位：economy/business/first 或 经济舱/公务舱/头等舱"),
     return_date: Optional[str] = Query(None, description="返程日期（可选，YYYY-MM-DD）"),
     adults: int = Query(1, ge=1, le=9, description="成人乘客数量"),
+    children: int = Query(0, ge=0, le=8, description="儿童乘客数量 (Bug 2548095)"),
     currency: str = Query("USD", description="货币：USD, CNY, EUR, etc."),
     stops: Optional[int] = Query(None, ge=0, le=3, description="经停：0=任意, 1=直飞, 2=1经停或更少, 3=2经停或更少"),
     sort_by: str = Query("score", description="排序方式：score/price/duration/departure/arrival"),
@@ -117,6 +118,7 @@ async def search_flights(
                     return_date=return_date,
                     travel_class=travel_class,
                     adults=adults,
+                    children=children,
                     currency=currency,
                     stops=stops,
                     traveler_type=traveler_type,  # Pass traveler_type for optimal sorting
@@ -256,6 +258,7 @@ async def search_roundtrip_flights(
     return_date: str = Query(..., description="返程日期（YYYY-MM-DD）"),
     cabin: str = Query("economy", description="舱位：economy/business/first"),
     adults: int = Query(1, ge=1, le=9, description="成人乘客数量"),
+    children: int = Query(0, ge=0, le=8, description="儿童乘客数量 (Bug 2548095)"),
     currency: str = Query("USD", description="货币"),
     stops: Optional[int] = Query(None, ge=0, le=3, description="经停过滤"),
     traveler_type: str = Query("default", description="旅客类型：student/business/family/default"),
@@ -294,6 +297,7 @@ async def search_roundtrip_flights(
             return_date=return_date,  # Round-trip to get price_insights!
             travel_class=travel_class,
             adults=adults,
+            children=children,
             currency=currency,
             stops=stops,
             traveler_type=traveler_type,
@@ -306,6 +310,7 @@ async def search_roundtrip_flights(
             return_date=None,  # One-way for individual return flight pricing
             travel_class=travel_class,
             adults=adults,
+            children=children,
             currency=currency,
             stops=stops,
             traveler_type=traveler_type,
@@ -370,6 +375,7 @@ async def get_return_flights(
     return_date: str = Query(..., description="返程日期（YYYY-MM-DD）"),
     cabin: str = Query("economy", description="舱位：economy/business/first"),
     adults: int = Query(1, ge=1, le=9, description="成人乘客数量"),
+    children: int = Query(0, ge=0, le=8, description="儿童乘客数量 (Bug 2548095)"),
     currency: str = Query("USD", description="货币"),
     traveler_type: str = Query("default", description="用户类型：student/business/family/default"),
     authorization: Optional[str] = Header(None)
@@ -404,6 +410,7 @@ async def get_return_flights(
             departure_token=departure_token,
             travel_class=travel_class,
             adults=adults,
+            children=children,
             currency=currency,
             traveler_type=traveler_type
         )

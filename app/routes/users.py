@@ -45,6 +45,7 @@ async def get_favorites(
         departureCity=f.departure_city,
         arrivalCity=f.arrival_city,
         departureTime=f.departure_time,
+        arrivalTime=f.arrival_time,
         price=f.price,
         score=f.score,
         createdAt=f.created_at
@@ -85,6 +86,7 @@ async def add_favorite(
         departure_city=favorite_data.departure_city,
         arrival_city=favorite_data.arrival_city,
         departure_time=favorite_data.departure_time,
+        arrival_time=favorite_data.arrival_time,
         price=favorite_data.price,
         score=favorite_data.score
     )
@@ -101,6 +103,7 @@ async def add_favorite(
         departureCity=db_favorite.departure_city,
         arrivalCity=db_favorite.arrival_city,
         departureTime=db_favorite.departure_time,
+        arrivalTime=db_favorite.arrival_time,
         price=db_favorite.price,
         score=db_favorite.score,
         createdAt=db_favorite.created_at

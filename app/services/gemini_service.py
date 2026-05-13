@@ -490,7 +490,7 @@ class GeminiService:
         
         # --- Stops ---
         stops = "any"
-        if any(w in q_lower for w in ["direct", "nonstop", "non-stop", "直飞", "直飛"]):
+        if any(w in q_lower for w in ["direct", "nonstop", "non-stop", "without transfer", "without stops", "without layover", "no stops", "no transfer", "no layover", "直飞", "直飛", "直航", "无中转", "無中轉"]):
             stops = "0"
         elif "1 stop" in q_lower or "one stop" in q_lower:
             stops = "1"
@@ -506,6 +506,40 @@ class GeminiService:
         elif any(w in q_lower for w in ["night", "red-eye", "red eye", "凌晨"]):
             time_pref = "night"
         
+        # --- Passengers (structured: adults/children/infants) ---
+        # CRITICAL: "1 adult 1 child" must NOT collapse into "2 adults".
+        adults_n = 0
+        children_n = 0
+        infants_n = 0
+        # Match "<N> adult(s)?", "<N> child(ren)?/kid(s)?", "<N> infant(s)?/baby/babies"
+        m = re.search(r'(\d+)\s*adult', q_lower)
+        if m:
+            adults_n = max(adults_n, int(m.group(1)))
+        m = re.search(r'(\d+)\s*(?:child|children|kid|kids)', q_lower)
+        if m:
+            children_n = max(children_n, int(m.group(1)))
+        m = re.search(r'(\d+)\s*(?:infant|infants|baby|babies|toddler)', q_lower)
+        if m:
+            infants_n = max(infants_n, int(m.group(1)))
+        # Chinese variants: "<N>个/位/名 + 成人/大人/小孩/儿童/兒童/婴儿/嬰兒"
+        m = re.search(r'(\d+)\s*(?:个|位|名)?\s*(?:成人|大人)', q)
+        if m:
+            adults_n = max(adults_n, int(m.group(1)))
+        m = re.search(r'(\d+)\s*(?:个|位|名)?\s*(?:小孩|儿童|兒童|小童)', q)
+        if m:
+            children_n = max(children_n, int(m.group(1)))
+        m = re.search(r'(\d+)\s*(?:个|位|名)?\s*(?:婴儿|嬰兒|宝宝|寶寶)', q)
+        if m:
+            infants_n = max(infants_n, int(m.group(1)))
+        if adults_n == 0 and children_n == 0 and infants_n == 0:
+            # No explicit breakdown — try generic "<N> passengers/people/travelers/人"
+            m = re.search(r'(\d+)\s*(?:passenger|passengers|people|persons?|travelers?)', q_lower)
+            if not m:
+                m = re.search(r'(\d+)\s*人', q)
+            adults_n = int(m.group(1)) if m else 1
+        if adults_n < 1:
+            adults_n = 1
+
         # Apply smart defaults for missing fields
         # Date: default to today if not specified (nearest flights)
         if not date_str:
@@ -513,7 +547,59 @@ class GeminiService:
         # Stops: keep 'any' if not specified (show all flights)
         # Only filter by stops if user explicitly requested direct/nonstop
         # Time: keep 'any' as-is (all day, no time filter)
-        
+
+        # --- Round-trip / return date detection (Bug 2548104) ---
+        # Look for two dates in patterns like "6/1 to 6/8", "Jun 1 - Jun 8",
+        # "6月1日去 6月8日返", or any single date paired with a round-trip
+        # keyword. We only emit return_date when we can pin down the second date.
+        return_date_str = None
+        roundtrip_keywords = [
+            "round trip", "round-trip", "roundtrip", "return on", "return date",
+            "coming back", "back on", "returning", "and return", "with return",
+            "往返", "回程", "返程",
+        ]
+        has_roundtrip_keyword = any(kw in q_lower for kw in roundtrip_keywords) or any(kw in q for kw in ["往返", "回程", "返程"])
+        # Try "MM/DD to MM/DD" or "MM-DD - MM-DD"
+        two_slash = re.search(r'(\d{1,2})[/\-](\d{1,2})\s*(?:to|-|–|—|至|→|->)\s*(\d{1,2})[/\-](\d{1,2})', q_lower)
+        if two_slash:
+            m1, d1, m2, d2 = (int(two_slash.group(i)) for i in range(1, 5))
+            if 1 <= m1 <= 12 and 1 <= d1 <= 31 and 1 <= m2 <= 12 and 1 <= d2 <= 31:
+                year = today.year
+                try:
+                    first = today.replace(month=m1, day=d1)
+                    if first < today:
+                        year += 1
+                    date_str = f"{year}-{m1:02d}-{d1:02d}"
+                    second_year = year
+                    second = today.replace(year=second_year, month=m2, day=d2)
+                    if second < today.replace(year=year, month=m1, day=d1):
+                        second_year += 1
+                    return_date_str = f"{second_year}-{m2:02d}-{d2:02d}"
+                except ValueError:
+                    pass
+        if return_date_str is None and has_roundtrip_keyword:
+            # Look for a second "Month Day" in the query after the first
+            month_names = {
+                "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+                "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6,
+                "july": 7, "jul": 7, "august": 8, "aug": 8, "september": 9, "sep": 9,
+                "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+            }
+            month_pat = '|'.join(month_names.keys())
+            md_all = list(re.finditer(rf'({month_pat})\s+(\d{{1,2}})', q_lower))
+            if len(md_all) >= 2:
+                m_name = md_all[1].group(1)
+                d_num = int(md_all[1].group(2))
+                m_num = month_names[m_name]
+                year = today.year
+                try:
+                    second = today.replace(month=m_num, day=d_num)
+                    if second < today:
+                        year += 1
+                    return_date_str = f"{year}-{m_num:02d}-{d_num:02d}"
+                except ValueError:
+                    pass
+
         return {
             "has_destination": bool(destination_code),
             "destination_city": destination_city,
@@ -521,8 +607,9 @@ class GeminiService:
             "departure_city": departure_city,
             "departure_code": departure_code,
             "date": date_str,
+            "return_date": return_date_str,
             "time_preference": time_pref,
-            "passengers": 1,
+            "passengers": {"adults": adults_n, "children": children_n, "infants": infants_n},
             "cabin_class": cabin_class,
             "sort_by": sort_by,
             "stops": stops,
@@ -548,7 +635,7 @@ IMPORTANT: If the user only provides a city or destination name (e.g. "Tokyo", "
 ## Defaults (apply when not mentioned by user):
 - date: today ({datetime.now().strftime("%Y-%m-%d")})
 - time_preference: any (all day, no time filter)
-- passengers: 1
+- passengers: {{"adults": 1, "children": 0, "infants": 0}}
 - cabin_class: economy
 - sort_by: score
 - stops: any (all flights, no stops filter)
@@ -561,7 +648,13 @@ Extract the following from the user's query:
 2. **departure** (optional) - The departure city/airport (if not provided, will be auto-detected)
 3. **date** (optional) - Travel date (if not provided, defaults to tomorrow)
 4. **time_preference** (optional) - morning(6-12), afternoon(12-18), evening(18-22), night(22-6). Default: morning
-5. **passengers** (optional) - Number of passengers (defaults to 1)
+5. **passengers** (optional) - Object with adults/children/infants counts. Defaults to {{"adults":1,"children":0,"infants":0}}.
+   - Adults: ages 12+
+   - Children: ages 2-11 (terms like "child", "kid", "小孩", "兒童")
+   - Infants: under 2 (terms like "infant", "baby", "婴儿")
+   - CRITICAL: "1 adult 1 child" → {{"adults":1,"children":1,"infants":0}}, NEVER "adults":2.
+   - "2 passengers" with no breakdown → {{"adults":2,"children":0,"infants":0}}.
+   - "family of 4" with no breakdown → {{"adults":2,"children":2,"infants":0}}.
 6. **cabin_class** (optional) - economy, premium_economy, business, first (defaults to economy)
 7. **sort_preference** (optional) - What to prioritize: comfort, price, duration, or balanced (defaults to score)
 8. **stops** (optional) - Number of stops: "0" for direct/nonstop, "1" for 1 stop, "2+" for 2+ stops, "any" for all flights. Default: "any" (all flights)
@@ -569,6 +662,12 @@ Extract the following from the user's query:
 10. **alliance** (optional) - "star", "oneworld", "skyteam" or "any"
 11. **max_price** (optional) - Maximum price budget in USD if mentioned, null if not
 12. **preferred_airlines** (optional) - Specific airline IATA codes if mentioned
+
+## CRITICAL — Airport Code Rules:
+- NEVER invent or guess a 3-letter IATA airport code. If you are not 100% certain a code maps to a real IATA airport (and to the city the user mentioned), leave `departure_code` / `destination_code` as an empty string and the backend will resolve them from the city name.
+- Phrases like "no red-eye flights", "no layover", "non-stop" describe flight properties — they are NOT airport codes. NEVER turn "red-eye" into an airport code such as "RED".
+- Only emit codes from the reference list below or codes you are certain are real (e.g. SFO, JFK, LAX, ORD, ATL, BOS, SEA, MIA, IAH, DFW, DEN, PHX, MUC, FRA, AMS, MAD, FCO, ZRH, VIE, ARN, CPH, HEL, IST, DOH, AUH, JNB, NBO, CGK, MNL, KUL, DEL, BOM, SYD, MEL, AKL, YYZ, YVR, MEX).
+- For ambiguous countries / regions (e.g. "the US", "Thailand", "Europe") leave the code empty and put the country/region in the city field — the backend will pick a hub.
 
 ## Airport Code Reference:
 - Hong Kong: HKG
@@ -595,6 +694,12 @@ Extract the following from the user's query:
 - "next Friday" / "下周五" → calculate actual date
 - "this weekend" → coming Saturday
 
+## Round-Trip / Return Date Interpretation:
+- Detect round-trip intent from any of: "round trip" / "round-trip" / "roundtrip" / "return on" / "return date" / "coming back" / "back on" / "returning" / "and return" / "with return" / "往返" / "往返機票" / "往返机票" / "回程" / "返程" / "X月X日返" / "X日回".
+- When the query also contains a second date (e.g. "from June 1 to June 8", "Jun 1 - Jun 8", "6/1 to 6/8", "6月1日去 6月8日返", "下週一去下週五回"), treat the SECOND date as `return_date` and the FIRST date as `date`.
+- If the second date is omitted but a round-trip keyword is present, leave `return_date` as null (frontend will keep it one-way until user clarifies).
+- If only one date is mentioned with no round-trip keywords, `return_date` MUST be null.
+
 ## Time Interpretation:
 - "morning flight" / "早班机" / "早上" → morning
 - "afternoon" / "下午" → afternoon
@@ -608,7 +713,7 @@ Extract the following from the user's query:
 - No preference mentioned → score (balanced)
 
 ## Stops Interpretation:
-- "direct" / "nonstop" / "non-stop" / "直飞" → 0
+- "direct" / "nonstop" / "non-stop" / "direct flight" / "without transfer" / "without stops" / "without layover" / "no stops" / "no transfer" / "no layover" / "直飞" / "直航" / "无中转" / "無中轉" → 0
 - "1 stop" / "one stop" / "转一次" → 1
 - "2 stops" / "multiple stops" → 2+
 - Not mentioned → any (show all flights, no filter)
@@ -655,8 +760,9 @@ Extract the following from the user's query:
   "departure_city": "City name or empty",
   "departure_code": "IATA code or empty",
   "date": "YYYY-MM-DD or empty",
+  "return_date": "YYYY-MM-DD or null (only when user explicitly asked for a round-trip with a second date)",
   "time_preference": "morning|afternoon|evening|night|any",
-  "passengers": 1,
+  "passengers": {{"adults": 1, "children": 0, "infants": 0}},
   "cabin_class": "economy|premium_economy|business|first",
   "sort_by": "score|price|duration|comfort",
   "stops": "any|0|1|2+",
@@ -740,6 +846,22 @@ Respond with JSON only, no explanation:"""
                 raise Exception("No JSON found in response")
 
             parsed = json.loads(json_match.group(0))
+
+            # Normalize passengers to {adults, children, infants} object
+            # (handles legacy int responses and missing keys safely)
+            raw_pax = parsed.get("passengers", 1)
+            if isinstance(raw_pax, dict):
+                parsed["passengers"] = {
+                    "adults": max(1, int(raw_pax.get("adults", 1) or 0)),
+                    "children": max(0, int(raw_pax.get("children", 0) or 0)),
+                    "infants": max(0, int(raw_pax.get("infants", 0) or 0)),
+                }
+            else:
+                try:
+                    n = max(1, int(raw_pax))
+                except (TypeError, ValueError):
+                    n = 1
+                parsed["passengers"] = {"adults": n, "children": 0, "infants": 0}
 
             # Post-process: if user typed an explicit IATA pair like "PAO to HKG"
             # but Gemini didn't recognise the departure code (e.g. PAO is a small

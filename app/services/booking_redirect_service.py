@@ -115,8 +115,10 @@ class BookingRedirectService:
         travel_class: Optional[int],
         hl: str,
         currency: str,
+        adults: int = 1,
+        children: int = 0,
     ) -> str:
-        return f"{booking_token}|{travel_class or ''}|{hl}|{currency}"
+        return f"{booking_token}|{travel_class or ''}|{hl}|{currency}|a{adults}c{children}"
 
     def _cache_get(self, key: str) -> Optional[Dict[str, Any]]:
         import time
@@ -149,6 +151,8 @@ class BookingRedirectService:
         currency: str = "USD",
         travel_class: Optional[int] = None,
         hl: str = "en",
+        adults: int = 1,
+        children: int = 0,
     ) -> Dict[str, Any]:
         """
         Fetch booking options from SerpAPI using a booking_token.
@@ -181,7 +185,9 @@ class BookingRedirectService:
         """
         # Check cache first — booking_token is self-contained, so the same
         # token + travel_class + hl + currency always returns the same options.
-        cache_key = self._cache_key(booking_token, travel_class, hl, currency)
+        # Bug 2548098: include adults/children in the cache key so 1-pax and
+        # multi-pax requests don't collide on the same cached price.
+        cache_key = self._cache_key(booking_token, travel_class, hl, currency, adults, children)
         cached = self._cache_get(cache_key)
         if cached is not None:
             print(f"⚡ Booking: cache HIT for token (saved SerpAPI call)")
@@ -232,6 +238,16 @@ class BookingRedirectService:
             "gl": gl,
             "currency": currency,
         }
+
+        # Bug 2548098: forward passenger counts so SerpAPI returns the real
+        # multi-passenger total price. Without this the response always quoted
+        # the single-adult fare (e.g. $766) and the redirect deep-links also
+        # carried passengers=1, conflicting with the platform's $1531 (2 pax)
+        # price displayed in the search results.
+        if adults and adults > 1:
+            base_params["adults"] = str(adults)
+        if children and children > 0:
+            base_params["children"] = str(children)
         
         # travel_class affects the cabin class in the airline redirect URL
         # (e.g. CABINCLASS=C for business instead of Y for economy)

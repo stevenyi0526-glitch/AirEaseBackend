@@ -294,7 +294,9 @@ class MockFlightService:
                 dimension="comfort",
                 title=exp["title"],
                 detail=exp["detail"],
-                isPositive=exp["is_positive"]
+                isPositive=exp["is_positive"],
+                i18n_key=exp.get("i18n_key"),
+                i18n_params=exp.get("i18n_params"),
             ))
         
         # Add service explanations from airline reviews
@@ -309,7 +311,9 @@ class MockFlightService:
                 dimension="service",
                 title=exp["title"],
                 detail=exp["detail"],
-                isPositive=exp["is_positive"]
+                isPositive=exp["is_positive"],
+                i18n_key=exp.get("i18n_key"),
+                i18n_params=exp.get("i18n_params"),
             ))
         
         explanations.append(

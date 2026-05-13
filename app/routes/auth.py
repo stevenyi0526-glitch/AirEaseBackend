@@ -8,6 +8,7 @@ import hashlib
 import logging
 import re
 from fastapi import APIRouter, HTTPException, Depends, status, Header
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -190,9 +191,14 @@ async def register(user_data: UserCreate, db: Session = Depends(get_db)):
     enc_type = user_data.enc or ''
     plain_password = _decode_password(user_data.password, enc_type)
 
-    # Validate password strength (skip when pre-hashed — hex has no uppercase)
-    if enc_type != 'sha256':
-        _validate_password_strength(plain_password)
+    # Validate strength on the ORIGINAL plaintext, never on the derived hash.
+    # Pre-hashed encodings ('sha256', 'nonce_xor_sha256') are validated client-side.
+    if enc_type in ('', 'base64'):
+        try:
+            raw = base64.b64decode(user_data.password).decode('utf-8') if enc_type == 'base64' else user_data.password
+        except Exception:
+            raw = user_data.password
+        _validate_password_strength(raw)
 
     # Generate verification code
     code = verification_service.generate_code()
@@ -314,7 +320,16 @@ async def verify_email(
     )
 
     db.add(db_user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        # Most likely cause: user_name UNIQUE constraint already taken
+        # (email uniqueness was checked above). Return 400 instead of 500.
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Username already taken. Please choose a different username."
+        ) from exc
     db.refresh(db_user)
 
     # Generate token
@@ -570,33 +585,42 @@ async def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(
     - **email**: Registered email address
 
     Sends a 6-digit verification code to the email if the account exists.
-    Always returns success to prevent email enumeration attacks.
+
+    Bug 2548048: Testers reported that any (unregistered) email previously
+    returned "code sent" with no feedback. Per the bug report we now respond
+    with HTTP 404 when the email is not registered so the UI can prompt the
+    user to sign up instead. This trades a small email-enumeration disclosure
+    for the requested UX improvement.
     """
     user = db.query(UserDB).filter(UserDB.user_email == request.email).first()
-    
-    if user:
-        # Generate verification code
-        code = verification_service.generate_code()
-        
-        # Store as pending "password reset" — reuse the pending registration store
-        # with a special marker
-        verification_service.store_pending_registration(
-            email=request.email,
-            code=code,
-            user_data={"action": "password_reset", "user_id": user.user_id}
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="EMAIL_NOT_REGISTERED",
         )
-        
-        # Send reset email
-        await verification_service.send_verification_email(
-            email=request.email,
-            code=code,
-            username=user.user_name,
-            subject="AirEase - Password Reset Code"
-        )
-    
-    # Always return success to prevent email enumeration
+
+    # Generate verification code
+    code = verification_service.generate_code()
+
+    # Store as pending "password reset" — reuse the pending registration store
+    # with a special marker
+    verification_service.store_pending_registration(
+        email=request.email,
+        code=code,
+        user_data={"action": "password_reset", "user_id": user.user_id},
+    )
+
+    # Send reset email
+    await verification_service.send_verification_email(
+        email=request.email,
+        code=code,
+        username=user.user_name,
+        subject="AirEase - Password Reset Code",
+    )
+
     return VerificationResponse(
-        message="If this email is registered, a password reset code has been sent",
+        message="A password reset code has been sent to your email",
         email=request.email,
         expires_in_minutes=verification_service.CODE_EXPIRY_MINUTES
     )
@@ -638,8 +662,13 @@ async def reset_password(request: ResetPasswordRequest, db: Session = Depends(ge
     # Update password
     enc_type = request.enc or ''
     plain_new_password = _decode_password(request.new_password, enc_type)
-    if enc_type != 'sha256':
-        _validate_password_strength(plain_new_password)
+    # Validate strength on the ORIGINAL plaintext only (pre-hashed → client-validated).
+    if enc_type in ('', 'base64'):
+        try:
+            raw = base64.b64decode(request.new_password).decode('utf-8') if enc_type == 'base64' else request.new_password
+        except Exception:
+            raw = request.new_password
+        _validate_password_strength(raw)
     user.user_password = plain_new_password
     if hasattr(user, 'needs_password_update'):
         user.needs_password_update = False
@@ -677,10 +706,14 @@ async def change_password(
             detail="Current password is incorrect"
         )
     
-    # Validate new password strength (skip when pre-hashed — frontend validates)
-    if enc_type != 'sha256':
-        _validate_password_strength(plain_new_password)
-    
+    # Validate strength on the ORIGINAL plaintext only (pre-hashed → client-validated).
+    if enc_type in ('', 'base64'):
+        try:
+            raw = base64.b64decode(request.new_password).decode('utf-8') if enc_type == 'base64' else request.new_password
+        except Exception:
+            raw = request.new_password
+        _validate_password_strength(raw)
+
     # Update password and clear the update flag
     current_user.user_password = plain_new_password
     if hasattr(current_user, 'needs_password_update'):

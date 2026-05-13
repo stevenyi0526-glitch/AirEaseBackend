@@ -393,7 +393,12 @@ class AirlineReviewsService:
                 explanations.append({
                     "title": "Food & Beverage",
                     "detail": f"Rated {ratings.food_rating:.1f}/10 by {ratings.review_count} travelers",
-                    "is_positive": is_positive
+                    "is_positive": is_positive,
+                    "i18n_key": "scoreExplain.foodBeverage",
+                    "i18n_params": {
+                        "rating": f"{ratings.food_rating:.1f}",
+                        "reviewCount": ratings.review_count,
+                    },
                 })
             
             # Ground service explanation
@@ -402,7 +407,9 @@ class AirlineReviewsService:
                 explanations.append({
                     "title": "Ground Service",
                     "detail": f"Check-in and boarding rated {ratings.ground_service_rating:.1f}/10",
-                    "is_positive": is_positive
+                    "is_positive": is_positive,
+                    "i18n_key": "scoreExplain.groundService",
+                    "i18n_params": {"rating": f"{ratings.ground_service_rating:.1f}"},
                 })
             
             # In-flight service explanation
@@ -411,7 +418,9 @@ class AirlineReviewsService:
                 explanations.append({
                     "title": "Cabin Crew Service",
                     "detail": f"In-flight service rated {ratings.service_rating:.1f}/10",
-                    "is_positive": is_positive
+                    "is_positive": is_positive,
+                    "i18n_key": "scoreExplain.cabinCrewService",
+                    "i18n_params": {"rating": f"{ratings.service_rating:.1f}"},
                 })
             
             # Recommendation rate
@@ -420,14 +429,18 @@ class AirlineReviewsService:
                 explanations.append({
                     "title": "Traveler Recommendations",
                     "detail": f"{ratings.recommendation_rate:.0f}% of travelers recommend this airline",
-                    "is_positive": is_positive
+                    "is_positive": is_positive,
+                    "i18n_key": "scoreExplain.travelerRecommendations",
+                    "i18n_params": {"percent": f"{ratings.recommendation_rate:.0f}"},
                 })
         else:
             # No data
             explanations.append({
                 "title": "Service Quality",
                 "detail": "Standard airline service",
-                "is_positive": service_score >= 7.0
+                "is_positive": service_score >= 7.0,
+                "i18n_key": "scoreExplain.serviceQualityStandard",
+                "i18n_params": {},
             })
         
         return explanations

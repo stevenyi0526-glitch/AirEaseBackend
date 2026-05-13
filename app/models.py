@@ -142,6 +142,12 @@ class ScoreExplanation(BaseModel):
     detail: str
     is_positive: bool = Field(alias="isPositive")
     cabin_class: Optional[str] = Field(default=None, alias="cabinClass")  # "economy", "business", or None for both
+    # i18n hints — when present the frontend renders translated strings instead
+    # of the English `title` / `detail` above. The English fields are kept so
+    # downstream code that does keyword matching (e.g. dimension classification)
+    # continues to work.
+    i18n_key: Optional[str] = Field(default=None, alias="i18nKey")
+    i18n_params: Optional[dict] = Field(default=None, alias="i18nParams")
     
     class Config:
         populate_by_name = True
@@ -513,8 +519,12 @@ class FavoriteCreate(BaseModel):
     departure_city: str = Field(alias="departureCity")
     arrival_city: str = Field(alias="arrivalCity")
     departure_time: datetime = Field(alias="departureTime")
+    # Bug 2548275: optional arrival time so existing clients keep working.
+    arrival_time: Optional[datetime] = Field(default=None, alias="arrivalTime")
     price: int
-    score: int
+    # Bug 2548059: keep the precise overall score (0–10 with 1 decimal) so the
+    # favorites view shows the same badge value as the search results.
+    score: float
     
     class Config:
         populate_by_name = True
@@ -529,8 +539,9 @@ class FavoriteResponse(BaseModel):
     departure_city: str = Field(alias="departureCity")
     arrival_city: str = Field(alias="arrivalCity")
     departure_time: datetime = Field(alias="departureTime")
+    arrival_time: Optional[datetime] = Field(default=None, alias="arrivalTime")
     price: int
-    score: int
+    score: float
     created_at: datetime = Field(alias="createdAt")
     
     class Config:

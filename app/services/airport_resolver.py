@@ -59,6 +59,8 @@ _CJK_TO_EN = {
     "长春": "Changchun", "長春": "Changchun",
     "兰州": "Lanzhou", "蘭州": "Lanzhou",
     "乌鲁木齐": "Urumqi", "烏魯木齊": "Urumqi",
+    # Bug 2548192: Kashgar (KHG, far-west Xinjiang). Common 喀什 vs 喀什噶尔 forms.
+    "喀什": "Kashgar", "喀什噶爾": "Kashgar", "喀什噶尔": "Kashgar",
     "拉萨": "Lhasa", "拉薩": "Lhasa",
     "呼和浩特": "Hohhot",
     "台北": "Taipei", "桃園": "Taoyuan", "桃园": "Taoyuan",
@@ -143,6 +145,15 @@ _CJK_TO_EN = {
     "布拉格": "Prague",
     "布達佩斯": "Budapest", "布达佩斯": "Budapest",
     "莫斯科": "Moscow",
+    # Bug 2548112: Russian cities — St. Petersburg (LED).
+    "聖彼得堡": "Saint Petersburg", "圣彼得堡": "Saint Petersburg",
+    "聖彼得": "Saint Petersburg", "圣彼得": "Saint Petersburg",
+    "聖彼德堡": "Saint Petersburg", "圣彼德堡": "Saint Petersburg",
+    "索契": "Sochi", "葉卡捷琳堡": "Yekaterinburg", "叶卡捷琳堡": "Yekaterinburg",
+    "新西伯利亞": "Novosibirsk", "新西伯利亚": "Novosibirsk",
+    # Bug 2548086: Reykjavik (KEF).
+    "雷克雅維克": "Reykjavik", "雷克雅维克": "Reykjavik",
+    "雷克雅未克": "Reykjavik", "雷克雅未克機場": "Reykjavik",
 
     # North America
     "紐約": "New York", "纽约": "New York", "曼哈頓": "New York", "曼哈顿": "New York",
@@ -203,6 +214,14 @@ _CJK_TO_EN = {
 _PRIMARY_HUB = {
     "new york": "JFK", "manhattan": "JFK",
     "london": "LHR", "paris": "CDG", "moscow": "SVO",
+    # Bug 2548112: St Petersburg (LED), 2548086: Reykjavik (KEF).
+    "saint petersburg": "LED", "st petersburg": "LED", "st. petersburg": "LED",
+    "leningrad": "LED",
+    "reykjavik": "KEF", "keflavik": "KEF",
+    "sochi": "AER",
+    "yekaterinburg": "SVX", "novosibirsk": "OVB",
+    # Bug 2548192: Kashgar (KHG) and Osh (OSS).
+    "kashgar": "KHG", "kashi": "KHG", "osh": "OSS",
     "tokyo": "HND", "osaka": "KIX", "seoul": "ICN",
     "shanghai": "PVG", "beijing": "PEK",
     "los angeles": "LAX", "san francisco": "SFO", "chicago": "ORD",
@@ -261,6 +280,40 @@ _PRIMARY_HUB = {
     "hiroshima": "HIJ",
     "busan": "PUS", "jeju": "CJU", "gimpo": "GMP", "incheon": "ICN",
     "maui": "OGG", "kahului": "OGG", "kona": "KOA",
+    # Country / region fallbacks. When the user (or the LLM) gives just a
+    # country name we pick the country's primary international hub. Avoids
+    # the search collapsing to a random small airport that happens to share
+    # a substring with another word in the query.
+    "us": "JFK", "usa": "JFK", "u.s.": "JFK", "u.s.a.": "JFK",
+    "united states": "JFK", "america": "JFK",
+    "canada": "YYZ", "mexico": "MEX",
+    "uk": "LHR", "u.k.": "LHR", "united kingdom": "LHR",
+    "britain": "LHR", "great britain": "LHR", "england": "LHR",
+    "scotland": "EDI", "wales": "CWL", "ireland": "DUB",
+    "france": "CDG", "germany": "FRA", "italy": "FCO", "spain": "MAD",
+    "portugal": "LIS", "netherlands": "AMS", "holland": "AMS",
+    "belgium": "BRU", "switzerland": "ZRH", "austria": "VIE",
+    "poland": "WAW", "greece": "ATH", "sweden": "ARN", "norway": "OSL",
+    "denmark": "CPH", "finland": "HEL", "czech republic": "PRG",
+    "hungary": "BUD", "russia": "SVO", "ukraine": "KBP", "turkey": "IST",
+    "china": "PEK", "japan": "HND", "korea": "ICN", "south korea": "ICN",
+    "taiwan": "TPE",
+    "thailand": "BKK", "vietnam": "SGN", "malaysia": "KUL",
+    "indonesia": "CGK", "philippines": "MNL", "cambodia": "PNH",
+    "laos": "VTE", "myanmar": "RGN", "burma": "RGN",
+    "india": "DEL", "pakistan": "ISB", "bangladesh": "DAC",
+    "sri lanka": "CMB", "nepal": "KTM",
+    "australia": "SYD", "new zealand": "AKL",
+    "uae": "DXB", "u.a.e.": "DXB", "united arab emirates": "DXB",
+    "saudi arabia": "RUH", "qatar": "DOH", "israel": "TLV",
+    "egypt": "CAI", "south africa": "JNB", "kenya": "NBO",
+    "nigeria": "LOS", "morocco": "CMN",
+    "brazil": "GRU", "argentina": "EZE", "chile": "SCL",
+    "peru": "LIM", "colombia": "BOG",
+    "europe": "LHR", "asia": "HKG", "africa": "JNB",
+    "north america": "JFK", "south america": "GRU",
+    "middle east": "DXB", "southeast asia": "BKK",
+    "east asia": "HKG", "south asia": "DEL",
 }
 
 
@@ -349,6 +402,12 @@ def resolve_to_iata(query: str) -> Optional[Tuple[str, str]]:
         hit = _lookup_iata(q)
         if hit:
             return hit
+        # Bug 2548375: 3-letter token but not an actual IATA code (e.g. "kol",
+        # "xyz"). Substring matching would silently map "kol" → Kolkata (CCU)
+        # because the fuzzy step matches city names containing the substring.
+        # Treat unknown 3-letter tokens as ambiguous and let the caller surface
+        # an error rather than guess.
+        return None
 
     # 3. CJK → English
     q_en = _translate_cjk(q)
@@ -363,6 +422,9 @@ def resolve_to_iata(query: str) -> Optional[Tuple[str, str]]:
         _fold_diacritics(q_en).lower(),
     ).strip()
     hub_key = re.sub(r"\s+", " ", hub_key)
+    # Strip leading article "the" so "the US" / "the UK" / "the Netherlands"
+    # match their entries in _PRIMARY_HUB.
+    hub_key = re.sub(r"^the\s+", "", hub_key)
     if hub_key in _PRIMARY_HUB:
         hit = _lookup_iata(_PRIMARY_HUB[hub_key])
         if hit:

@@ -9,6 +9,7 @@ engines, narratives) to build a comprehensive safety profile.
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 import logging
+import re
 
 from sqlalchemy import text
 from app.database import SessionLocal
@@ -16,6 +17,26 @@ from app.services.aircraft_db_service import AircraftDatabaseService
 from app.services.aerodatabox_service import enrich_aircraft as aerodatabox_enrich
 
 logger = logging.getLogger(__name__)
+
+
+# Bug 2548356: Some upstream sources (OpenSky CSV, AeroDataBox raw text) embed
+# stray HTML line breaks ('<br>', '<br/>', '<br />') or NBSP entities inside
+# engine strings, which leak into the UI as literal "br" tokens. Strip them
+# here at the API boundary so every consumer (web, iOS, share poster) sees
+# clean text.
+_HTML_BR_RE = re.compile(r"<\s*br\s*/?\s*>", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _sanitize_engine_str(s):
+    if not s:
+        return s
+    cleaned = _HTML_BR_RE.sub(" ", s)
+    cleaned = _HTML_TAG_RE.sub("", cleaned)
+    cleaned = cleaned.replace("&nbsp;", " ").replace("&amp;", "&")
+    # Collapse runs of whitespace
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ;,")
+    return cleaned or None
 
 
 def _infer_engine_type_from_string(engine_str: Optional[str]) -> Optional[str]:
@@ -511,8 +532,7 @@ def build_safety_profile(
                 engine_str = engine_source["engines"]
                 if engine_source.get("engineType"):
                     engine_str += f" ({engine_source['engineType']})"
-                eng_type = engine_source.get("engineType") or eng_type
-        # Fill age from OpenSky
+                eng_type = engine_source.get("engineType") or eng_type        # Fill age from OpenSky
         built_year = opensky_info.get("builtYear")
         age_years = opensky_info.get("aircraftAge")
         age_label = opensky_info.get("aircraftAgeLabel")
@@ -622,7 +642,7 @@ def build_safety_profile(
             "num_seats": num_seats,
         },
         "technical_specs": {
-            "engine": engine_str,
+            "engine": _sanitize_engine_str(engine_str),
             "eng_mfgr": eng_mfgr,
             "eng_model": eng_model,
             "eng_type": eng_type,

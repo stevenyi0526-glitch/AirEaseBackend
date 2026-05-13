@@ -10,7 +10,7 @@ from typing import Optional, List
 
 from app.models import AISearchRequest, AISearchResponse
 from app.services.gemini_service import gemini_service
-from app.services.airport_resolver import resolve_to_iata
+from app.services.airport_resolver import resolve_to_iata, _lookup_iata
 
 router = APIRouter(prefix="/v1/ai", tags=["AI Search"])
 
@@ -144,12 +144,33 @@ async def parse_query(request: ParseQueryRequest):
     - "cheapest direct flight to Bangkok"
     - "去上海"
     """
+    # Pre-check: detect flight-number lookup intent (e.g. "American AA 1313",
+    # "flight UA 857", "航班号 CA1858"). The product doesn't support direct
+    # flight-number lookup, so short-circuit with a structured signal that the
+    # frontend can render in the user's locale.
+    if _looks_like_flight_number_lookup(request.query):
+        return _empty_parse_result(
+            unsupported_intent="flight_number_lookup",
+            error_code="FLIGHT_NUMBER_LOOKUP_NOT_SUPPORTED",
+        )
+
+    # Redact flight-property phrases from the query the LLM sees so it can't
+    # mistake them for airport codes (e.g. 'red-eye' → 'RED'). The original
+    # query is still used for downstream resolution heuristics.
+    sanitized_query = _redact_property_phrases(request.query)
+
     try:
-        result = await gemini_service.parse_natural_language_query(request.query)
+        result = await gemini_service.parse_natural_language_query(sanitized_query)
     except Exception as e:
         # Instead of returning 500, use local fallback parser
         print(f"AI parse_query falling back to local parser: {e}")
-        result = gemini_service._local_parse_natural_language(request.query)
+        result = gemini_service._local_parse_natural_language(sanitized_query)
+
+    # Drop hallucinated IATA codes that don't exist in the airports DB.
+    # Bug: Gemini sometimes invents codes like "RED" from phrases like
+    # "no red-eye flights" or "US to Thailand". The downstream resolver
+    # would otherwise pass the bogus code straight to the search API.
+    _drop_hallucinated_codes(result)
 
     # Post-process: resolve any unresolved departure / destination by querying
     # the airports DB. Handles small/private airports (e.g. "palo alto airport"
@@ -172,6 +193,12 @@ _FROM_TO_EN_RE = re.compile(
 _FROM_TO_CN_RE = re.compile(
     r"(?:从|從|出發於|出发于)\s*([\u4e00-\u9fff]+?)\s*(?:到|至|往|去|飛|飞|→|->)\s*([\u4e00-\u9fff]+)"
 )
+# Bug 2548250: Japanese sentence pattern "X から Y へ / X から Y まで / X から Y に".
+# Without this the resolver only saw the standalone Kanji "北京" (matching as a
+# CJK city via _TO_ONLY_CN_RE in some cases) and lost the destination.
+_FROM_TO_JP_RE = re.compile(
+    r"([\u3400-\u9fff]+)\s*(?:から|発)\s*([\u3400-\u9fff]+)\s*(?:へ|まで|に|行き)"
+)
 _TO_ONLY_EN_RE = re.compile(
     r"(?:^|\s)(?:to|going\s+to|fly\s+to)\s+"
     r"([A-Za-z][A-Za-z0-9\s'.\-]{1,40}?)"
@@ -191,7 +218,12 @@ _TO_ONLY_CN_RE = re.compile(
 def _extract_from_to(query: str):
     """Pull user-typed origin/destination phrases out of the raw query.
     Returns (from_str | None, to_str | None)."""
-    # Chinese 从X到Y first (more specific)
+    # Japanese "X から Y へ" first — must precede the generic CN pattern so
+    # queries like "北京から休斯顿へ" are not partially captured by 去/到.
+    m = _FROM_TO_JP_RE.search(query)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    # Chinese 从X到Y next (more specific)
     m = _FROM_TO_CN_RE.search(query)
     if m:
         return m.group(1).strip(), m.group(2).strip()
@@ -205,6 +237,160 @@ def _extract_from_to(query: str):
     if m:
         return None, m.group(1).strip()
     return None, None
+
+
+# Common airline IATA codes used to recognise "<airline> <number>" flight-number
+# lookups (e.g. "AA1313", "United UA 857"). This is intentionally curated to
+# the major carriers — extending it is cheap, but false positives here would
+# block legitimate searches.
+_AIRLINE_IATA_CODES = frozenset({
+    # North America
+    "AA", "UA", "DL", "AS", "B6", "F9", "NK", "WN", "HA", "AC", "WS",
+    # Europe
+    "BA", "LH", "AF", "KL", "IB", "AY", "SK", "LX", "OS", "AZ", "TK",
+    "EI", "VS", "DY", "FR", "U2", "VY", "TP", "LO", "SU",
+    # Middle East / Africa
+    "EK", "QR", "EY", "SV", "MS", "ET", "KQ", "RJ", "GF", "WY",
+    # Asia / Oceania
+    "CX", "KA", "SQ", "TG", "MH", "GA", "JL", "NH", "KE", "OZ", "BR",
+    "CI", "MU", "CA", "CZ", "HU", "FM", "MF", "ZH", "9C", "NX", "QF",
+    "VA", "NZ", "FJ", "PR", "5J", "VN", "TR", "AK", "AI", "6E", "UK",
+})
+
+# "American AA1313", "AA 1313", "United UA857", "flight number CA1858",
+# "\u822a\u73ed\u53f7 CA1858" \u2192 detected as flight-number lookup.
+_FLIGHT_NUMBER_RE = re.compile(r"\b([A-Z]{2})\s*(\d{1,5})\b")
+_FLIGHT_NUMBER_KEYWORD_RE = re.compile(
+    r"(flight\s*(?:number|no|num)?|\u822a\u73ed\u53f7|\u822a\u73ed\u865f|\u73ed\u6b21)\s*[:#]?\s*([A-Z]{2})?\s*(\d{1,5})",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_flight_number_lookup(query: str) -> bool:
+    """Return True if the query is asking to look up a specific flight by its
+    flight number rather than search for flight options."""
+    if not query:
+        return False
+    q = query.strip()
+    # Explicit "flight number ..." / "\u822a\u73ed\u53f7 ..." anywhere wins.
+    if _FLIGHT_NUMBER_KEYWORD_RE.search(q):
+        return True
+    # Otherwise look for an airline IATA code immediately followed by digits.
+    for m in _FLIGHT_NUMBER_RE.finditer(q):
+        airline = m.group(1).upper()
+        if airline in _AIRLINE_IATA_CODES:
+            return True
+    return False
+
+
+def _empty_parse_result(unsupported_intent: Optional[str] = None,
+                        error_code: Optional[str] = None) -> dict:
+    """Return a parse-query response shaped exactly like the normal one but
+    with all fields empty/defaulted, plus optional intent flags."""
+    out = {
+        "has_destination": False,
+        "destination_city": "",
+        "destination_code": "",
+        "departure_city": "",
+        "departure_code": "",
+        "date": "",
+        "return_date": None,
+        "time_preference": "any",
+        "passengers": {"adults": 1, "children": 0, "infants": 0},
+        "cabin_class": "economy",
+        "sort_by": "score",
+        "stops": "any",
+        "aircraft_type": "any",
+        "alliance": "any",
+        "max_price": None,
+        "preferred_airlines": [],
+    }
+    if unsupported_intent:
+        out["unsupported_intent"] = unsupported_intent
+    if error_code:
+        out["error_code"] = error_code
+    return out
+
+
+def _drop_hallucinated_codes(result: dict) -> None:
+    """Validate AI-returned IATA codes and drop ones that are obviously wrong.
+
+    Two failure modes are handled:
+      1. The code doesn't exist as an IATA airport (e.g. invented gibberish).
+      2. The code exists but the city Gemini paired it with is a country or
+         region (e.g. departure_city='United States', departure_code='RED' —
+         RED is a real tiny WV airport, but the user clearly wanted a US hub).
+         When that happens we drop the code so the resolver can pick the
+         country's primary hub via _PRIMARY_HUB.
+    """
+    for code_key, city_key in (
+        ("departure_code", "departure_city"),
+        ("destination_code", "destination_city"),
+    ):
+        code = (result.get(code_key) or "").strip().upper()
+        if not code:
+            continue
+        # 1) shape + DB existence check
+        if not re.fullmatch(r"[A-Z]{3}", code) or _lookup_iata(code) is None:
+            result[code_key] = ""
+            city = (result.get(city_key) or "").strip()
+            if city.upper() == code:
+                result[city_key] = ""
+            if code_key == "destination_code":
+                result["has_destination"] = False
+            continue
+        # 2) country/region check — don't trust a specific airport code if
+        # the user's city term is actually a country or large region.
+        city_norm = (result.get(city_key) or "").strip().lower()
+        city_norm = re.sub(r"^the\s+", "", city_norm)
+        if city_norm in _COUNTRY_OR_REGION_WORDS:
+            result[code_key] = ""  # let resolver pick the hub for this country
+            # leave city in place so resolver has something to work with
+
+
+# Words that name a country / region rather than a city. When Gemini pairs an
+# airport code with one of these, the code is almost certainly wrong (it'll be
+# some random small airport rather than the country's main hub).
+_COUNTRY_OR_REGION_WORDS = frozenset({
+    "us", "usa", "u.s.", "u.s.a.", "united states", "america",
+    "canada", "mexico",
+    "uk", "u.k.", "united kingdom", "britain", "great britain", "england",
+    "scotland", "wales", "ireland",
+    "france", "germany", "italy", "spain", "portugal", "netherlands",
+    "holland", "belgium", "switzerland", "austria", "poland", "greece",
+    "sweden", "norway", "denmark", "finland", "czech republic", "hungary",
+    "russia", "ukraine", "turkey",
+    "china", "japan", "korea", "south korea", "north korea",
+    "taiwan", "hong kong sar", "macau sar",
+    "thailand", "vietnam", "singapore", "malaysia", "indonesia",
+    "philippines", "cambodia", "laos", "myanmar", "burma",
+    "india", "pakistan", "bangladesh", "sri lanka", "nepal",
+    "australia", "new zealand",
+    "uae", "u.a.e.", "united arab emirates", "saudi arabia", "qatar",
+    "israel", "egypt", "south africa", "kenya", "nigeria", "morocco",
+    "brazil", "argentina", "chile", "peru", "colombia",
+    "europe", "asia", "africa", "north america", "south america",
+    "middle east", "southeast asia", "east asia", "south asia",
+    "中国", "日本", "韩国", "美国", "英国", "法国", "德国", "加拿大",
+    "泰国", "澳大利亚", "新加坡", "印度", "印尼", "菲律宾", "越南",
+    "台灣", "台湾",
+})
+
+
+# Phrases that describe flight properties (not airports). Gemini sometimes
+# yanks the first 3-letter substring out of these and treats it as an IATA
+# code (e.g. 'red-eye' → 'RED'). We redact them from the query before sending
+# it to Gemini so the temptation never appears.
+_REDACT_PHRASE_RE = re.compile(
+    r"\b(?:no\s+)?(?:red[\s\-]?eye|red\s+eye|redeye|over[\s\-]?night|overnight)\s*(?:flights?)?\b",
+    re.IGNORECASE,
+)
+
+
+def _redact_property_phrases(query: str) -> str:
+    """Strip flight-property phrases that have tempted the LLM into inventing
+    airport codes from substrings (e.g. 'red-eye' → 'RED')."""
+    return _REDACT_PHRASE_RE.sub(" ", query)
 
 
 def _enrich_with_airport_resolver(query: str, result: dict) -> None:

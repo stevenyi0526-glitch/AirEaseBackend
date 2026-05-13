@@ -1055,6 +1055,13 @@ async def get_booking_links(
                 redirect_params["cabin_class"] = cabin_class
             if hl and hl != "en":
                 redirect_params["hl"] = hl
+            # Bug 2548098: keep adults/children on the redirect URL so the
+            # downstream redirect-by-index call still gets the correct fare
+            # and passenger count when stamped into the airline deep-link.
+            if adults and adults != 1:
+                redirect_params["adults"] = str(adults)
+            if children and children > 0:
+                redirect_params["children"] = str(children)
 
             redirect_url = f"{base_url}/v1/booking/redirect-by-index?{urlencode(redirect_params)}"
 
@@ -1094,6 +1101,10 @@ async def redirect_by_index(
     outbound_date: Optional[str] = Query(None),
     return_date: Optional[str] = Query(None),
     cabin_class: Optional[str] = Query(None, description="Cabin class: economy, premium_economy, business, first"),
+    # Bug 2548098: accept passenger counts so the SerpAPI lookup and the
+    # downstream airline deep-link both quote the right multi-pax fare.
+    adults: int = Query(1, description="Number of adult passengers"),
+    children: int = Query(0, description="Number of child passengers"),
     hl: str = Query("en", description="Language for booking redirect (e.g. en, zh-TW, ja)"),
 ):
     """Redirect to a specific booking platform by its index in booking_options."""
@@ -1114,6 +1125,8 @@ async def redirect_by_index(
             return_date=return_date,
             travel_class=_cabin_to_travel_class(cabin_class),
             hl=hl,
+            adults=adults,
+            children=children,
         )
 
         booking_options = serpapi_response.get("booking_options", [])

@@ -3,7 +3,7 @@ AirEase Backend - Database Configuration
 SQLAlchemy + PostgreSQL setup
 """
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, Date, Text, ForeignKey, Enum as SQLEnum, func, text
+from sqlalchemy import create_engine, Column, Integer, Float, String, Boolean, DateTime, Date, Text, ForeignKey, Enum as SQLEnum, func, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship
 from datetime import datetime
@@ -109,8 +109,14 @@ class FavoriteDB(Base):
     departure_city = Column(String(10), nullable=False)
     arrival_city = Column(String(10), nullable=False)
     departure_time = Column(DateTime, nullable=False)
+    # Bug 2548275: store arrival time so the favorites card can show both
+    # ends of the leg (the search result page already shows departure +
+    # arrival, the favorites view was previously missing arrival).
+    arrival_time = Column(DateTime, nullable=True)
     price = Column(Integer, nullable=False)
-    score = Column(Integer, nullable=False)
+    # Bug 2548059: store precise score (e.g. 8.7) so the favorites page can
+    # match the same 0.1-resolution badge that the search/detail pages render.
+    score = Column(Float, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     
     # Relationship
@@ -278,6 +284,17 @@ def init_db():
             )
             conn.commit()
             print("   Migration: added needs_password_update column")
+        except Exception:
+            conn.rollback()  # Column already exists
+
+        # Bug 2548275: add arrival_time column to favorites for the
+        # arrival-time display on the favorites card.
+        try:
+            conn.execute(
+                text("ALTER TABLE favorites ADD COLUMN arrival_time TIMESTAMP")
+            )
+            conn.commit()
+            print("   Migration: added favorites.arrival_time column")
         except Exception:
             conn.rollback()  # Column already exists
 

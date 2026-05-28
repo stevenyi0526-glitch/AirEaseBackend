@@ -23,6 +23,7 @@ from app.routes.autocomplete import router as autocomplete_router
 from app.routes.user_preferences import router as user_preferences_router
 from app.routes.exchange_rates import router as exchange_rates_router
 from app.routes.aircraft import router as aircraft_router
+from app.routes.external import router as external_router
 # PAUSED: SeatMap disabled until Amadeus production access (test env = cached/mock data)
 # from app.routes.seatmap import router as seatmap_router
 from app.database import init_db
@@ -133,6 +134,7 @@ app.include_router(user_preferences_router)
 app.include_router(reports_router)
 app.include_router(exchange_rates_router)
 app.include_router(aircraft_router)
+app.include_router(external_router)
 # PAUSED: SeatMap disabled until Amadeus production access
 # app.include_router(seatmap_router)
 

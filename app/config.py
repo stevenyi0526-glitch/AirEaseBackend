@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     
     # AeroDataBox (RapidAPI) - Aircraft data enrichment
     aerodatabox_rapidapi_key: str = ""
+
+    # External Partner API key (e.g. skifinder.ai). Leave blank to disable gating.
+    external_api_key: str = ""
     
     # PostgreSQL Database
     postgres_host: str = "localhost"

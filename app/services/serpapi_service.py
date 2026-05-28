@@ -39,9 +39,12 @@ class SerpAPIFlightService:
     # StarLux/Tigerair from TPE→NRT for TWD users).
     _CURRENCY_LOCALE: Dict[str, tuple] = {
         "USD": ("us", "en"),
-        "CNY": ("cn", "zh-CN"),
-        "HKD": ("hk", "zh-HK"),
-        "TWD": ("tw", "zh-TW"),
+        "CNY": ("cn", "zh-cn"),
+        # Bug (HKD 搜索 0 结果): SerpAPI 仅支持 zh-cn / zh-tw / en 作为 hl，
+        # 不接受 zh-HK / zh-CN / zh-TW 大写形式 — 返回 400 后会回落到 mock
+        # 数据导致用户在港币站点看不到真实航班。香港地区用 zh-tw（繁体）。
+        "HKD": ("hk", "zh-tw"),
+        "TWD": ("tw", "zh-tw"),
         "JPY": ("jp", "ja"),
         "KRW": ("kr", "ko"),
         "SGD": ("sg", "en"),
@@ -230,18 +233,56 @@ class SerpAPIFlightService:
         # what the user explicitly asked for. We compare on a normalized
         # lower-case form so "Premium economy" / "PREMIUM_ECONOMY" /
         # "premium-economy" all collapse to the same key.
+        # Bug (PEK→LHR 头等舱 0 结果): SerpAPI returns segment travel_class
+        # values like "First Class" / "Business Class" / "Economy class",
+        # while the user-facing filter is the bare "first" / "business" /
+        # "economy". Without stripping the trailing "_class" suffix the
+        # equality check fails for every real flight, dropping the entire
+        # result set. Also strip "economy_class" → "economy" so the
+        # "Economy class" SerpAPI value matches "economy".
         def _normalize_cabin(value: str) -> str:
-            return (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+            norm = (value or "").strip().lower().replace("-", "_").replace(" ", "_")
+            # Collapse trailing "_class" so "first_class" == "first" etc.
+            if norm.endswith("_class"):
+                norm = norm[: -len("_class")]
+            return norm
 
-        target_cabin = _normalize_cabin(cabin_filter)
-        if target_cabin and target_cabin != "any":
-            before = len(parsed_flights_data)
-            parsed_flights_data = [
-                (fws, fd) for (fws, fd) in parsed_flights_data
-                if _normalize_cabin(fws.flight.cabin) == target_cabin
-            ]
-            if before != len(parsed_flights_data):
-                print(f"[cabin-filter] dropped {before - len(parsed_flights_data)} non-{target_cabin} flights")
+        # Bug (PEK→LHR first 只返回 1 条而 Google 显示 6+): 长途国际航线 first/
+        # business 常以「混合舱位」行程出现（如 PEK→ICN 经济 + ICN→LHR 头等，
+        # Google 标记为 "經濟客位 + 頭等客位"）。SerpAPI 在 travel_class=4 调用下
+        # 已由 Google 过滤为「含目标舱位」行程，我们再按 first_segment 二次
+        # 过滤会把所有混合行程都丢弃。信任 SerpAPI 的 travel_class 参数，
+        # 不在本地再做 cabin 过滤。
+        # (cabin_filter still used downstream for response metadata.)
+        _ = _normalize_cabin(cabin_filter)  # noqa: F841 — kept for symmetry
+
+        # Bug (重复航班): SerpAPI / Google Flights frequently returns the same
+        # physical itinerary multiple times for different fare booking options
+        # (e.g. CA931 PEK-LHR 12:55→13:40 at HK$79,585 and HK$79,741). The user
+        # sees what looks like duplicate cards.
+        # Bug (PEK→LHR first 显示 1 条而 Google 显示 6 条): 之前 dedup key 只
+        # 使用 first_segment.flight_number + first dep + last arr，导致共享
+        # 相同首段（如 PEK→PVG MU5126）但中转/后续段不同的多条独立行程
+        # 被错误合并为一条。修复：key 需包含所有段的 flight_number 列表，
+        # 这样只有真正相同的物理 itinerary（不同 fare 选项）才会合并。
+        deduped: Dict[tuple, tuple] = {}
+        for fws, fd in parsed_flights_data:
+            f = fws.flight
+            dep_iso = f.departure_time.isoformat() if f.departure_time else ""
+            arr_iso = f.arrival_time.isoformat() if f.arrival_time else ""
+            # 完整 itinerary 签名：所有段的 flight_number + travel_class
+            segs = fd.get("flights", []) if isinstance(fd, dict) else []
+            seg_signature = tuple(
+                (s.get("flight_number") or "", s.get("travel_class") or "")
+                for s in segs
+            )
+            key = (seg_signature, dep_iso, arr_iso, _normalize_cabin(f.cabin))
+            existing = deduped.get(key)
+            if existing is None or (f.price or 0) < (existing[0].flight.price or 0):
+                deduped[key] = (fws, fd)
+        if len(deduped) != len(parsed_flights_data):
+            print(f"[dedup] merged {len(parsed_flights_data) - len(deduped)} duplicate fare options")
+            parsed_flights_data = list(deduped.values())
         
         # Find the SHORTEST flight duration for this route
         # This will be used as the baseline (10/10) for efficiency scoring
@@ -516,7 +557,17 @@ class SerpAPIFlightService:
         airline = first_segment.get("airline", "Unknown Airline")
         airline_logo = first_segment.get("airline_logo", "")
         flight_number = first_segment.get("flight_number", f"XX{index+1000}")
-        airplane = first_segment.get("airplane", "Unknown Aircraft")
+        # Bug (CA 107 PEK→LHR 头等舱显示 "波音 737MAX 8 Passenger"): first_segment
+        # 对于联程行程往往是短途接驳段（PEK→HKG 737），而真正代表整段旅程的
+        # 是长途段（HKG→LHR 777/787）。改为选择「duration 最长的段」对应的
+        # 机型作为代表，避免误导用户。
+        def _seg_duration(s: Dict[str, Any]) -> int:
+            d = s.get("duration")
+            if isinstance(d, (int, float)):
+                return int(d)
+            return 0
+        main_segment = max(segments, key=_seg_duration) if segments else first_segment
+        airplane = main_segment.get("airplane") or first_segment.get("airplane", "Unknown Aircraft")
         # Bug 2548171: SerpAPI 不一定每个 segment 都返回 travel_class，缺失时
         # 默认 "Economy"。但如果用户已经指定了非经济舱（cabin_filter 来自
         # 前端 cabin 参数），应当回落到该舱位字面值，避免头等舱搜索结果
@@ -1063,15 +1114,23 @@ class SerpAPIFlightService:
             otp_detail = f"On-time performance: {airline_otp:.1f}%"
             if often_delayed:
                 otp_detail += " (this flight often delayed 30+ min)"
+            i18n_key = "scoreExplain.reliability"
+            i18n_params: dict | None = {
+                "otp": f"{airline_otp:.1f}",
+                "delayKey": "scoreExplain.reliability.oftenDelayed" if often_delayed else "",
+            }
         else:
             otp_detail = "On-time data not available for this airline"
-        
+            i18n_key = "scoreExplain.reliabilityNoData"
+            i18n_params = None
         explanations.append(
             ScoreExplanation(
                 dimension="reliability",
                 title="Airline Reliability",
                 detail=otp_detail,
-                is_positive=reliability >= 7.5
+                is_positive=reliability >= 7.5,
+                i18n_key=i18n_key,
+                i18n_params=i18n_params,
             )
         )
         
@@ -1116,7 +1175,18 @@ class SerpAPIFlightService:
                 dimension="value",
                 title="Value for Money",
                 detail=price_insight_detail,
-                is_positive=value >= 7.0
+                is_positive=value >= 7.0,
+                i18n_key="scoreExplain.valueForMoney",
+                i18n_params={
+                    "price": f"{price:.0f}" if price else "",
+                    "levelKey": (
+                        f"scoreExplain.valueForMoney.{(price_insights or {}).get('price_level')}"
+                        if price_insights and (price_insights or {}).get("price_level") in ("low", "high", "typical")
+                        else ""
+                    ),
+                    "low": f"{(price_insights or {}).get('typical_price_range', [0, 0])[0]:.0f}" if price_insights and price_insights.get("typical_price_range") else "",
+                    "high": f"{(price_insights or {}).get('typical_price_range', [0, 0])[1]:.0f}" if price_insights and price_insights.get("typical_price_range") else "",
+                },
             )
         )
         

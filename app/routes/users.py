@@ -65,12 +65,22 @@ async def add_favorite(
     db: Session = Depends(get_db)
 ):
     """Add a flight to user favorites."""
-    # Check if already favorited
+    # Bug 2548089: dedup by flight_id OR by (flight_number + departure_time +
+    # route) — different SerpAPI sessions can return the same physical
+    # flight under a fresh `flight_id` token, so we'd otherwise allow
+    # duplicates of the same content.
     existing = db.query(FavoriteDB).filter(
         FavoriteDB.user_id == current_user.user_id,
-        FavoriteDB.flight_id == favorite_data.flight_id
+    ).filter(
+        (FavoriteDB.flight_id == favorite_data.flight_id)
+        | (
+            (FavoriteDB.flight_number == favorite_data.flight_number)
+            & (FavoriteDB.departure_time == favorite_data.departure_time)
+            & (FavoriteDB.departure_city == favorite_data.departure_city)
+            & (FavoriteDB.arrival_city == favorite_data.arrival_city)
+        )
     ).first()
-    
+
     if existing:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

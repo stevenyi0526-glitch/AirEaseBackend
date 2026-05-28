@@ -16,7 +16,7 @@ class GeminiService:
     """Gemini AI 服务 - 自然语言解析"""
     
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
-    MODEL = "gemini-3.1-flash-lite-preview"
+    MODEL = "gemini-3.1-flash-lite"
     
     # Errors that indicate a geo-restriction or API-level block (not our fault)
     GEO_BLOCK_KEYWORDS = [
@@ -301,6 +301,41 @@ class GeminiService:
             "barcelona": "BCN", "bcn": "BCN",
             "rome": "ROM", "fco": "FCO", "rom": "ROM",
             "chicago": "CHI", "ord": "ORD", "chi": "CHI",
+            # Bug: 北京→休斯顿 (and other 2nd-tier US cities) intermittently
+            # mis-resolved to same-city pairs because the destination wasn't
+            # in this curated dict. Add major US hubs + Chinese/Japanese
+            # transliterations + IATA fallbacks.
+            "houston": "IAH", "iah": "IAH", "hou": "HOU",
+            "休斯顿": "IAH", "休斯敦": "IAH", "休士頓": "IAH", "休士顿": "IAH",
+            "ヒューストン": "IAH",
+            "dallas": "DFW", "dfw": "DFW", "dal": "DAL",
+            "达拉斯": "DFW", "達拉斯": "DFW", "ダラス": "DFW",
+            "atlanta": "ATL", "atl": "ATL",
+            "亚特兰大": "ATL", "亞特蘭大": "ATL", "アトランタ": "ATL",
+            "boston": "BOS", "bos": "BOS",
+            "波士顿": "BOS", "波士頓": "BOS", "ボストン": "BOS",
+            "seattle": "SEA", "sea": "SEA",
+            "西雅图": "SEA", "西雅圖": "SEA", "シアトル": "SEA",
+            "miami": "MIA", "mia": "MIA",
+            "迈阿密": "MIA", "邁阿密": "MIA", "マイアミ": "MIA",
+            "denver": "DEN", "den": "DEN",
+            "丹佛": "DEN", "デンバー": "DEN",
+            "phoenix": "PHX", "phx": "PHX",
+            "凤凰城": "PHX", "鳳凰城": "PHX", "フェニックス": "PHX",
+            "washington": "WAS", "dc": "WAS", "iad": "IAD", "dca": "DCA", "was": "WAS",
+            "华盛顿": "WAS", "華盛頓": "WAS", "ワシントン": "WAS",
+            "philadelphia": "PHL", "phl": "PHL",
+            "费城": "PHL", "費城": "PHL", "フィラデルフィア": "PHL",
+            "minneapolis": "MSP", "msp": "MSP",
+            "明尼阿波利斯": "MSP", "ミネアポリス": "MSP",
+            "detroit": "DTW", "dtw": "DTW",
+            "底特律": "DTW", "デトロイト": "DTW",
+            "orlando": "MCO", "mco": "MCO",
+            "奥兰多": "MCO", "奧蘭多": "MCO", "オーランド": "MCO",
+            "las vegas": "LAS", "vegas": "LAS", "las": "LAS",
+            "拉斯维加斯": "LAS", "拉斯維加斯": "LAS", "ラスベガス": "LAS",
+            "salt lake city": "SLC", "slc": "SLC",
+            "盐湖城": "SLC", "鹽湖城": "SLC", "ソルトレイクシティ": "SLC",
             # Chinese
             "香港": "HKG", "东京": "TYO", "大阪": "OSA", "首尔": "SEL",
             "新加坡": "SIN", "曼谷": "BKK", "台北": "TPE",
@@ -308,6 +343,35 @@ class GeminiService:
             "成都": "CTU", "杭州": "HGH", "武汉": "WUH", "西安": "XIY",
             "南京": "NKG", "重庆": "CKG", "纽约": "NYC", "伦敦": "LON",
             "巴黎": "PAR", "悉尼": "SYD", "迪拜": "DXB", "吉隆坡": "KUL",
+            # Bug: "上海到海口" was being mis-resolved to a same-city pair
+            # because 海口 was not in this dict. Expand with major mainland
+            # destinations + their Traditional/Simplified variants.
+            "海口": "HAK", "haikou": "HAK", "hak": "HAK",
+            "三亚": "SYX", "三亞": "SYX", "sanya": "SYX", "syx": "SYX",
+            "厦门": "XMN", "廈門": "XMN", "xiamen": "XMN", "xmn": "XMN",
+            "青岛": "TAO", "青島": "TAO", "qingdao": "TAO", "tao": "TAO",
+            "天津": "TSN", "tianjin": "TSN", "tsn": "TSN",
+            "大连": "DLC", "大連": "DLC", "dalian": "DLC", "dlc": "DLC",
+            "昆明": "KMG", "kunming": "KMG", "kmg": "KMG",
+            "长沙": "CSX", "長沙": "CSX", "changsha": "CSX", "csx": "CSX",
+            "郑州": "CGO", "鄭州": "CGO", "zhengzhou": "CGO", "cgo": "CGO",
+            "济南": "TNA", "濟南": "TNA", "jinan": "TNA", "tna": "TNA",
+            "福州": "FOC", "fuzhou": "FOC", "foc": "FOC",
+            "宁波": "NGB", "寧波": "NGB", "ningbo": "NGB", "ngb": "NGB",
+            "桂林": "KWL", "guilin": "KWL", "kwl": "KWL",
+            "哈尔滨": "HRB", "哈爾濱": "HRB", "harbin": "HRB", "hrb": "HRB",
+            "沈阳": "SHE", "瀋陽": "SHE", "shenyang": "SHE", "she": "SHE",
+            "太原": "TYN", "taiyuan": "TYN", "tyn": "TYN",
+            "贵阳": "KWE", "貴陽": "KWE", "guiyang": "KWE", "kwe": "KWE",
+            "南宁": "NNG", "南寧": "NNG", "nanning": "NNG", "nng": "NNG",
+            "兰州": "LHW", "蘭州": "LHW", "lanzhou": "LHW", "lhw": "LHW",
+            "乌鲁木齐": "URC", "烏魯木齊": "URC", "urumqi": "URC", "urc": "URC",
+            "拉萨": "LXA", "拉薩": "LXA", "lhasa": "LXA", "lxa": "LXA",
+            "澳门": "MFM", "澳門": "MFM", "macau": "MFM", "macao": "MFM", "mfm": "MFM",
+            "高雄": "KHH", "kaohsiung": "KHH", "khh": "KHH",
+            "首爾": "SEL", "seoul": "SEL", "sel": "SEL",
+            "東京": "TYO", "tokyo": "TYO", "tyo": "TYO",
+            "大阪": "OSA", "osaka": "OSA", "osa": "OSA",
         }
         
         # Reverse: code → city name

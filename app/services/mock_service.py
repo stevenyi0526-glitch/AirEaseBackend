@@ -284,7 +284,8 @@ class MockFlightService:
                 dimension="reliability",
                 title="航司准点率",
                 detail=f"{flight.airline}准点率表现良好",
-                isPositive=True
+                isPositive=True,
+                i18n_key="scoreExplain.reliabilityNoData",
             )
         ]
         
@@ -321,7 +322,14 @@ class MockFlightService:
                 dimension="value",
                 title="价格评估",
                 detail=f"当前价格{'低于' if value > 7.5 else '接近'}该航线平均水平",
-                isPositive=value > 7.5
+                isPositive=value > 7.5,
+                i18n_key="scoreExplain.valueForMoney",
+                i18n_params={
+                    "price": "",
+                    "levelKey": "scoreExplain.valueForMoney.low" if value > 7.5 else "scoreExplain.valueForMoney.typical",
+                    "low": "",
+                    "high": "",
+                },
             )
         )
         

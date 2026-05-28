@@ -356,7 +356,9 @@ class AmadeusService:
             )
             
             if response.status_code != 200:
-                print(f"[Amadeus Availability] Error {response.status_code}: {response.text[:500]}")
+                # Amadeus test API frequently returns 500 for certain routes/dates;
+                # caller already degrades gracefully to an empty availability map.
+                print(f"[Amadeus Availability] Upstream {response.status_code} for {origin}->{destination} {date} — falling back to empty")
                 return {}
             
             data = response.json()

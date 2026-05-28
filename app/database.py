@@ -298,6 +298,24 @@ def init_db():
         except Exception:
             conn.rollback()  # Column already exists
 
+        # Bug 2548059: favorites.score was originally created as INTEGER on
+        # existing deployments. The model has since been widened to Float so
+        # the badge can render fractional scores like 4.3/5 instead of being
+        # rounded up to 4.5/5. Convert in-place; idempotent (no-op if already
+        # DOUBLE PRECISION). Postgres only.
+        try:
+            conn.execute(
+                text(
+                    "ALTER TABLE favorites "
+                    "ALTER COLUMN score TYPE DOUBLE PRECISION "
+                    "USING score::double precision"
+                )
+            )
+            conn.commit()
+            print("   Migration: widened favorites.score to DOUBLE PRECISION")
+        except Exception:
+            conn.rollback()  # Already widened, or non-Postgres backend
+
 
 def get_db():
     """

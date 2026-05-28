@@ -4,6 +4,7 @@ AI智能搜索API路由
 """
 
 import re
+from datetime import datetime
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
@@ -122,7 +123,7 @@ async def ai_health():
     return {
         "status": "ok" if has_key else "no_api_key",
         "service": "gemini",
-        "model": "gemini-3.1-flash-lite-preview",
+        "model": "gemini-3.1-flash-lite",
         "api_key_configured": has_key
     }
 
@@ -177,7 +178,72 @@ async def parse_query(request: ParseQueryRequest):
     # → PAO), CJK city names (e.g. "舊金山" → SFO) and misspellings
     # (e.g. "francicso" → SFO) that the LLM either skipped or got wrong.
     _enrich_with_airport_resolver(request.query, result)
+
+    # Bug ("5月21日北京飞伦敦"): Gemini intermittently shifts explicit Chinese
+    # dates by ±1 day (timezone or "next occurrence" guesswork). When the user
+    # spells out 「N月D日」 deterministically, override Gemini's date with the
+    # parsed date in the current year (rolling to next year only if the date
+    # has already passed this year).
+    _override_explicit_cjk_date(request.query, result)
     return result
+
+
+_CJK_MONTH_DAY_RE = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*[日号號]")
+
+
+def _override_explicit_cjk_date(query: str, result: dict) -> None:
+    """If the query contains explicit "N月D日" dates, force them onto the
+    result. The 1st match overrides `date`; the 2nd (if present) overrides
+    `return_date`. Both anchor to the current year, rolling forward to next
+    year only if the date has already passed; the return date is additionally
+    forced to be >= the outbound date so a round-trip never produces an
+    invalid (return < depart) pair across year boundaries.
+    Idempotent / safe."""
+    matches = list(_CJK_MONTH_DAY_RE.finditer(query))
+    if not matches:
+        return
+    today = datetime.now().date()
+
+    def _to_date(match):
+        try:
+            month = int(match.group(1))
+            day = int(match.group(2))
+            if not (1 <= month <= 12 and 1 <= day <= 31):
+                return None
+            candidate = today.replace(month=month, day=day)
+        except (ValueError, TypeError):
+            return None
+        if candidate < today:
+            try:
+                candidate = candidate.replace(year=today.year + 1)
+            except ValueError:
+                return None
+        return candidate
+
+    depart = _to_date(matches[0])
+    if depart is None:
+        return
+    result["date"] = depart.isoformat()
+
+    if len(matches) >= 2:
+        ret = _to_date(matches[1])
+        if ret is None:
+            return
+        # Ensure round-trip consistency: return must be on or after departure.
+        # If the natural-year resolution put return before depart (e.g. depart
+        # rolled to next year but return stayed in this year), bump return to
+        # depart's year (or +1 if still earlier).
+        if ret < depart:
+            try:
+                ret = ret.replace(year=depart.year)
+            except ValueError:
+                return
+            if ret < depart:
+                try:
+                    ret = ret.replace(year=depart.year + 1)
+                except ValueError:
+                    return
+        result["return_date"] = ret.isoformat()
 
 
 # Match "from X to Y" / "from X going to Y" / Chinese 从X到Y.
@@ -191,7 +257,13 @@ _FROM_TO_EN_RE = re.compile(
     re.IGNORECASE,
 )
 _FROM_TO_CN_RE = re.compile(
-    r"(?:从|從|出發於|出发于)\s*([\u4e00-\u9fff]+?)\s*(?:到|至|往|去|飛|飞|→|->)\s*([\u4e00-\u9fff]+)"
+    # Bug 2548192: list multi-char verbs (飞往/飛往/飞去/飛去) BEFORE single-char
+    # 飞/飛 so "从喀什飞往OSS" doesn't match 飞 first and capture 往 into the
+    # destination group. Also require the destination CJK group to be 2+ chars,
+    # since real city names are at least 2 chars and "往" alone is never a city.
+    r"(?:从|從|出發於|出发于)\s*([\u4e00-\u9fff]+?)\s*"
+    r"(?:飛往|飞往|飛去|飞去|到|至|往|去|飛|飞|→|->)\s*"
+    r"([\u4e00-\u9fff]{2,})"
 )
 # Bug 2548250: Japanese sentence pattern "X から Y へ / X から Y まで / X から Y に".
 # Without this the resolver only saw the standalone Kanji "北京" (matching as a
@@ -214,6 +286,29 @@ _TO_ONLY_CN_RE = re.compile(
     r"(?:去|到|往|至|飛去|飞去|飛往|飞往)\s*([\u4e00-\u9fff]+)"
 )
 
+# Bug 2548171: bare-verb pattern "X飞Y" / "X飛Y" without a 从/從 prefix.
+# e.g. "5月21日北京飞伦敦的头等舱" → origin=北京, destination=伦敦.
+# Bug (Shanghai→Haikou same-city): also accept the bare 到/至/往/去 verb so
+# queries like "上海到海口的航班" extract origin=上海, destination=海口
+# instead of falling through to Gemini (which may leave the destination
+# blank and let the geolocation default collide with the parsed origin).
+_X_FLY_Y_CN_RE = re.compile(
+    r"([\u4e00-\u9fff]{2,})\s*(?:飞往|飛往|飞去|飛去|飞|飛|到|至|往|去)\s*([\u4e00-\u9fff]{2,})"
+)
+# Bug 2548192: mixed CJK origin → Latin destination (often a 3-letter IATA),
+# e.g. "喀什飞OSS" / "喀什 到 OSS" / "从喀什飞往OSS".
+_CJK_TO_LATIN_RE = re.compile(
+    r"(?:从|從|出發於|出发于)?\s*([\u4e00-\u9fff]{2,})\s*"
+    r"(?:到|至|往|去|飛往|飞往|飛去|飞去|飛|飞|→|->)\s*"
+    r"([A-Za-z]{3,}(?:[\s'\.\-][A-Za-z]+)*)"
+)
+# And the symmetric Latin → CJK case ("Tokyo 到 北京").
+_LATIN_TO_CJK_RE = re.compile(
+    r"([A-Za-z]{3,}(?:[\s'\.\-][A-Za-z]+)*)\s*"
+    r"(?:到|至|往|去|飛往|飞往|飛去|飞去|飛|飞|→|->)\s*"
+    r"([\u4e00-\u9fff]{2,})"
+)
+
 
 def _extract_from_to(query: str):
     """Pull user-typed origin/destination phrases out of the raw query.
@@ -225,6 +320,17 @@ def _extract_from_to(query: str):
         return m.group(1).strip(), m.group(2).strip()
     # Chinese 从X到Y next (more specific)
     m = _FROM_TO_CN_RE.search(query)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    # Bug 2548171: bare "X飞Y" without 从 prefix.
+    m = _X_FLY_Y_CN_RE.search(query)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    # Bug 2548192: mixed CJK + Latin (e.g. "喀什飞OSS").
+    m = _CJK_TO_LATIN_RE.search(query)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    m = _LATIN_TO_CJK_RE.search(query)
     if m:
         return m.group(1).strip(), m.group(2).strip()
     m = _FROM_TO_EN_RE.search(query)
